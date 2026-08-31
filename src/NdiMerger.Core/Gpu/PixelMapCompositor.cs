@@ -28,7 +28,9 @@ internal struct LayerConstants
     public Matrix4x4 World;
     public Vector4 Color;
     public float UseTexAlpha;
-    public Vector3 Pad;
+    public float BlackKeyEnabled;
+    public float BlackKeyThreshold;
+    public float BlackKeySoftness;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -47,6 +49,10 @@ internal struct ReflectConstants
     public float LengthPx;
     public float FadeStart;
     public Vector2 SideFade;
+    public float BlackKeyEnabled;
+    public float BlackKeyThreshold;
+    public float BlackKeySoftness;
+    public float PadKey;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -285,7 +291,7 @@ public sealed class PixelMapCompositor : IDisposable
         ctx.VSSetConstantBuffer(1, _layerCb);
         ctx.PSSetConstantBuffer(1, _layerCb);
 
-        var visible = layers.Where(l => l.Visible).OrderBy(l => l.ZIndex).ToList();
+        var visible = layers.Where(l => l.IsEffectivelyVisible).OrderBy(l => l.ZIndex).ToList();
         var settings = reflection ?? FloorReflectionSettings.Default;
         var floor = zones?.FirstOrDefault(z => z.Id.Equals("floor", StringComparison.OrdinalIgnoreCase));
 
@@ -335,7 +341,14 @@ public sealed class PixelMapCompositor : IDisposable
 
         float w = layer.NativeWidth * layer.Scale;
         float h = layer.NativeHeight * layer.Scale;
-        DrawTexturedQuad(layer.X, layer.Y, w, h, layer.RotationDegrees, layer.Opacity, srv);
+        float threshold = Math.Clamp(layer.BlackKeyThreshold, 0f, 1f);
+        float softness = Math.Max(threshold * 0.35f, 0.001f);
+        DrawTexturedQuad(
+            layer.X, layer.Y, w, h, layer.RotationDegrees, layer.Opacity, srv,
+            useTexAlpha: false,
+            blackKeyEnabled: layer.BlackKeyEnabled,
+            blackKeyThreshold: threshold,
+            blackKeySoftness: softness);
     }
 
     private void BindLayerPipeline()
@@ -444,7 +457,10 @@ public sealed class PixelMapCompositor : IDisposable
                     FarB = quad.CutB,
                     LengthPx = quad.LengthPx,
                     FadeStart = Math.Clamp(settings.FadeStart, 0f, 1f),
-                    SideFade = new Vector2(quad.SideFadeA, quad.SideFadeB)
+                    SideFade = new Vector2(quad.SideFadeA, quad.SideFadeB),
+                    BlackKeyEnabled = layer.BlackKeyEnabled ? 1f : 0f,
+                    BlackKeyThreshold = Math.Clamp(layer.BlackKeyThreshold, 0f, 1f),
+                    BlackKeySoftness = Math.Max(Math.Clamp(layer.BlackKeyThreshold, 0f, 1f) * 0.35f, 0.001f)
                 };
                 ctx.UpdateSubresource(cb, _reflectCb);
                 ctx.VSSetConstantBuffer(0, _reflectCb);
@@ -564,7 +580,13 @@ public sealed class PixelMapCompositor : IDisposable
         _reflectTex = null;
     }
 
-    private void DrawTexturedQuad(float x, float y, float w, float h, float rotationDeg, float opacity, ID3D11ShaderResourceView srv, bool useTexAlpha = false)
+    private void DrawTexturedQuad(
+        float x, float y, float w, float h, float rotationDeg, float opacity,
+        ID3D11ShaderResourceView srv,
+        bool useTexAlpha = false,
+        bool blackKeyEnabled = false,
+        float blackKeyThreshold = 0.08f,
+        float blackKeySoftness = 0.03f)
     {
         var world =
             Matrix4x4.CreateScale(w, h, 1) *
@@ -585,7 +607,10 @@ public sealed class PixelMapCompositor : IDisposable
         {
             World = Matrix4x4.Transpose(world),
             Color = new Vector4(1, 1, 1, Math.Clamp(opacity, 0, 1)),
-            UseTexAlpha = useTexAlpha ? 1f : 0f
+            UseTexAlpha = useTexAlpha ? 1f : 0f,
+            BlackKeyEnabled = blackKeyEnabled ? 1f : 0f,
+            BlackKeyThreshold = blackKeyThreshold,
+            BlackKeySoftness = blackKeySoftness
         };
         _gpu.Context.UpdateSubresource(layer, _layerCb);
         _gpu.Context.PSSetShaderResource(0, srv);
@@ -602,7 +627,14 @@ public sealed class PixelMapCompositor : IDisposable
     {
         const string hlsl = """
             cbuffer FrameCB : register(b0) { float4x4 ViewProjection; };
-            cbuffer LayerCB : register(b1) { float4x4 World; float4 Color; float UseTexAlpha; float3 Pad; };
+            cbuffer LayerCB : register(b1) {
+                float4x4 World;
+                float4 Color;
+                float UseTexAlpha;
+                float BlackKeyEnabled;
+                float BlackKeyThreshold;
+                float BlackKeySoftness;
+            };
             Texture2D tex : register(t0);
             SamplerState samp : register(s0);
 
@@ -620,6 +652,11 @@ public sealed class PixelMapCompositor : IDisposable
             float4 PSMain(VSOut i) : SV_Target {
                 float4 c = tex.Sample(samp, i.uv);
                 float a = UseTexAlpha > 0.5 ? c.a * Color.a : Color.a;
+                if (BlackKeyEnabled > 0.5) {
+                    float luma = max(c.r, max(c.g, c.b));
+                    float soft = max(BlackKeySoftness, 0.001);
+                    a *= smoothstep(BlackKeyThreshold, BlackKeyThreshold + soft, luma);
+                }
                 return float4(c.rgb * Color.rgb, a);
             }
             """;
@@ -653,6 +690,10 @@ public sealed class PixelMapCompositor : IDisposable
                 float LengthPx;
                 float FadeStart;
                 float2 SideFade;
+                float BlackKeyEnabled;
+                float BlackKeyThreshold;
+                float BlackKeySoftness;
+                float PadKey;
             };
             Texture2D tex : register(t0);
             SamplerState samp : register(s0);
@@ -716,6 +757,12 @@ public sealed class PixelMapCompositor : IDisposable
                 if (alpha < 0.004) clip(-1);
 
                 float4 c = tex.Sample(samp, i.uv);
+                if (BlackKeyEnabled > 0.5) {
+                    float luma = max(c.r, max(c.g, c.b));
+                    float soft = max(BlackKeySoftness, 0.001);
+                    alpha *= smoothstep(BlackKeyThreshold, BlackKeyThreshold + soft, luma);
+                    if (alpha < 0.004) clip(-1);
+                }
                 return float4(c.rgb * Color.rgb, alpha);
             }
             """;

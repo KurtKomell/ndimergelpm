@@ -122,30 +122,8 @@ public sealed class CaptureVideoSource : BgraUploadSource
     private void OnFrame(IntPtr data, int length, int width, int height)
     {
         if (width <= 0 || height <= 0 || length <= 0) return;
-
-        int expected = width * height * 4;
         int srcStride = length / Math.Max(1, height);
-        var packed = new byte[expected];
-
-        if (_flipVertical)
-        {
-            for (int y = 0; y < height; y++)
-            {
-                int srcY = height - 1 - y;
-                Marshal.Copy(data + srcY * srcStride, packed, y * width * 4, width * 4);
-            }
-        }
-        else if (srcStride == width * 4)
-        {
-            Marshal.Copy(data, packed, 0, Math.Min(length, expected));
-        }
-        else
-        {
-            for (int y = 0; y < height; y++)
-                Marshal.Copy(data + y * srcStride, packed, y * width * 4, width * 4);
-        }
-
-        SubmitFrame(packed, width, height, width * 4);
+        SubmitFrameFromPtr(data, width, height, srcStride, _flipVertical);
     }
 
     private void Pump()

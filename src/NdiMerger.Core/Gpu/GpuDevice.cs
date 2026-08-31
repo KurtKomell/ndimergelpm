@@ -8,6 +8,10 @@ namespace NdiMerger.Core.Gpu;
 public sealed class GpuDevice : IDisposable
 {
     private readonly IDXGIAdapter1 _adapter;
+    private readonly ID3D11Multithread? _multithread;
+
+    /// <summary>Serializes immediate-context use across the render thread and browser upload workers.</summary>
+    public object ContextLock { get; } = new();
 
     public ID3D11Device Device { get; }
     public ID3D11DeviceContext Context { get; }
@@ -35,6 +39,10 @@ public sealed class GpuDevice : IDisposable
 
         Device = device;
         Context = context;
+
+        // Allow browser upload threads to call into the same immediate context safely.
+        _multithread = Device.QueryInterfaceOrNull<ID3D11Multithread>();
+        _multithread?.SetMultithreadProtected(true);
     }
 
     private static IDXGIAdapter1 SelectAdapter(out string name, out uint vendorId)
@@ -116,6 +124,7 @@ public sealed class GpuDevice : IDisposable
 
     public void Dispose()
     {
+        _multithread?.Dispose();
         Context.Dispose();
         Device.Dispose();
         _adapter.Dispose();

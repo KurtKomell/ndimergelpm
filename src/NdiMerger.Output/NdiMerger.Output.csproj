@@ -18,4 +18,10 @@
     <ProjectReference Include="..\NdiMerger.Sources\NdiMerger.Sources.csproj" />
   </ItemGroup>
 
+  <Target Name="RemoveWebView2Wpf" BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="$([System.String]::Copy('%(Identity)').Contains('WebView2.Wpf'))" />
+    </ItemGroup>
+  </Target>
+
 </Project>

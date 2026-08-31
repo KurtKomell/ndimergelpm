@@ -11,10 +11,21 @@
 
   <ItemGroup>
     <PackageReference Include="DirectShowLib.Standard" Version="2.1.0" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3537.50">
+      <!-- Keep runtime/native flowing to App; do not import WPF WebView2.targets into WPF/Output. -->
+      <PrivateAssets>compile;build;buildTransitive;contentfiles;analyzers</PrivateAssets>
+    </PackageReference>
     <PackageReference Include="NDILibDotNet6" Version="1.0.11" />
     <PackageReference Include="Spout2.NET" Version="0.1.0-alpha.2" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
   </ItemGroup>
+
+  <!-- WebView2.targets injects Wpf.dll at import time; strip it before reference resolution (WindowsBase 5.0). -->
+  <Target Name="RemoveWebView2Wpf" BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="$([System.String]::Copy('%(Identity)').Contains('WebView2.Wpf'))" />
+    </ItemGroup>
+  </Target>
 
   <ItemGroup>
     <ProjectReference Include="..\NdiMerger.Core\NdiMerger.Core.csproj" />

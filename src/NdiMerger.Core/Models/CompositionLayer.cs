@@ -36,8 +36,25 @@ public sealed class CompositionLayer : INotifyPropertyChanged
     public ScaleMode ScaleMode { get; set; } = ScaleMode.Native;
     public string? ZoneId { get; set; }
 
+    /// <summary>Optional folder group; null = ungrouped (root).</summary>
+    public Guid? GroupId { get; set; }
+
+    /// <summary>
+    /// Synced from parent <see cref="LayerGroup.Visible"/>. When the group is hidden,
+    /// members stay individually Visible but are not drawn.
+    /// </summary>
+    private bool _parentGroupVisible = true;
+    public bool ParentGroupVisible
+    {
+        get => _parentGroupVisible;
+        set => SetField(ref _parentGroupVisible, value);
+    }
+
     private bool _visible = true;
     public bool Visible { get => _visible; set => SetField(ref _visible, value); }
+
+    /// <summary>Drawn / hit-tested only when both the layer and its group are visible.</summary>
+    public bool IsEffectivelyVisible => Visible && ParentGroupVisible;
 
     public int ZIndex { get; set; }
 
@@ -46,6 +63,24 @@ public sealed class CompositionLayer : INotifyPropertyChanged
 
     private int _nativeHeight;
     public int NativeHeight { get => _nativeHeight; set => SetField(ref _nativeHeight, value); }
+
+    private bool _blackKeyEnabled;
+    public bool BlackKeyEnabled { get => _blackKeyEnabled; set => SetField(ref _blackKeyEnabled, value); }
+
+    private float _blackKeyThreshold = 0.08f;
+    public float BlackKeyThreshold
+    {
+        get => _blackKeyThreshold;
+        set => SetField(ref _blackKeyThreshold, Math.Clamp(value, 0f, 1f));
+    }
+
+    /// <summary>UI-only: layer is checked for multi-assign into a group. Not persisted.</summary>
+    private bool _markedForGroup;
+    public bool MarkedForGroup
+    {
+        get => _markedForGroup;
+        set => SetField(ref _markedForGroup, value);
+    }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 

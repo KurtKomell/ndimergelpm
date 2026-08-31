@@ -165,38 +165,47 @@ public partial class MainWindow : Window
         }
 
         // Layer content bounds on the map (after rotation)
-        foreach (var layer in Vm.Layers)
+        if (Vm.ShowLayerOverlays)
         {
-            if (!layer.Visible) continue;
-            var (bx, by, bw, bh) = layer.GetMapBounds();
-            if (bw <= 0 || bh <= 0) continue;
-
-            bool selected = ReferenceEquals(layer, Vm.SelectedLayer);
-            var layerRect = new Rectangle
+            foreach (var layer in Vm.Layers)
             {
-                Width = bw * sx,
-                Height = bh * sy,
-                Stroke = selected ? Brushes.Yellow : Brushes.Lime,
-                StrokeThickness = selected ? 2.5 : 1.5,
-                StrokeDashArray = selected ? null : new DoubleCollection { 4, 2 },
-                Fill = new SolidColorBrush(Color.FromArgb(selected ? (byte)55 : (byte)35, 50, 255, 80))
-            };
-            Canvas.SetLeft(layerRect, bx * sx);
-            Canvas.SetTop(layerRect, by * sy);
-            OverlayCanvas.Children.Add(layerRect);
+                if (!layer.IsEffectivelyVisible) continue;
+                var (bx, by, bw, bh) = layer.GetMapBounds();
+                if (bw <= 0 || bh <= 0) continue;
 
-            var layerLabel = new TextBlock
-            {
-                Text = $"{layer.Name} ({layer.NativeWidth}×{layer.NativeHeight})",
-                Foreground = Brushes.White,
-                Background = new SolidColorBrush(Color.FromArgb(160, 0, 0, 0)),
-                FontSize = 11,
-                Padding = new Thickness(3, 1, 3, 1)
-            };
-            Canvas.SetLeft(layerLabel, bx * sx + 4);
-            Canvas.SetTop(layerLabel, by * sy + 4);
-            OverlayCanvas.Children.Add(layerLabel);
+                bool selected = ReferenceEquals(layer, Vm.SelectedLayer);
+                var layerRect = new Rectangle
+                {
+                    Width = bw * sx,
+                    Height = bh * sy,
+                    Stroke = selected ? Brushes.Yellow : Brushes.Lime,
+                    StrokeThickness = selected ? 2.5 : 1.5,
+                    StrokeDashArray = selected ? null : new DoubleCollection { 4, 2 },
+                    Fill = new SolidColorBrush(Color.FromArgb(selected ? (byte)55 : (byte)35, 50, 255, 80))
+                };
+                Canvas.SetLeft(layerRect, bx * sx);
+                Canvas.SetTop(layerRect, by * sy);
+                OverlayCanvas.Children.Add(layerRect);
+
+                var layerLabel = new TextBlock
+                {
+                    Text = $"{layer.Name} ({layer.NativeWidth}×{layer.NativeHeight})",
+                    Foreground = Brushes.White,
+                    Background = new SolidColorBrush(Color.FromArgb(160, 0, 0, 0)),
+                    FontSize = 11,
+                    Padding = new Thickness(3, 1, 3, 1)
+                };
+                Canvas.SetLeft(layerLabel, bx * sx + 4);
+                Canvas.SetTop(layerLabel, by * sy + 4);
+                OverlayCanvas.Children.Add(layerLabel);
+            }
         }
+    }
+
+    private void LayerTree_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
+    {
+        if (e.NewValue is LayerTreeNode node)
+            Vm.SelectedTreeNode = node;
     }
 
     private bool TryGetCanvasSize(out int w, out int h)

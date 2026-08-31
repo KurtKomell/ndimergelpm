@@ -12,5 +12,6 @@ public enum SourceKind
     Ndi,
     Spout,
     Capture,
-    Solid
+    Solid,
+    Browser
 }

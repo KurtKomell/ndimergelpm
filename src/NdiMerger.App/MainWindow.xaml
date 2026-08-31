@@ -46,6 +46,15 @@
     <Style TargetType="ListBoxItem">
       <Setter Property="Foreground" Value="White" />
     </Style>
+    <Style TargetType="TreeView">
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="Background" Value="#2A2A2A" />
+      <Setter Property="BorderBrush" Value="#444" />
+    </Style>
+    <Style TargetType="TreeViewItem">
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="IsExpanded" Value="True" />
+    </Style>
     <Style TargetType="StatusBar">
       <Setter Property="Foreground" Value="White" />
       <Setter Property="Background" Value="#111" />
@@ -80,7 +89,8 @@
         <TextBlock DockPanel.Dock="Top" Text="SOURCES" FontWeight="Bold" Margin="0,0,0,6" Foreground="White" />
         <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,6">
           <Button Content="Refresh" Command="{Binding RefreshSourcesCommand}" Margin="0,0,6,0" />
-          <Button Content="Add" Command="{Binding AddSelectedSourceCommand}" />
+          <Button Content="Add" Command="{Binding AddSelectedSourceCommand}" Margin="0,0,6,0" />
+          <Button Content="Browser" Command="{Binding AddBrowserSourceCommand}" />
         </StackPanel>
         <ListBox ItemsSource="{Binding AvailableSources}"
                  SelectedItem="{Binding SelectedSource}"
@@ -111,6 +121,17 @@
                      Foreground="White"
                      Background="#AA000000"
                      IsHitTestVisible="False" />
+          <TextBlock Text="{Binding SelectedSourceHud}"
+                     HorizontalAlignment="Right"
+                     VerticalAlignment="Bottom"
+                     Margin="8"
+                     Padding="6,3"
+                     FontSize="13"
+                     FontWeight="SemiBold"
+                     Foreground="White"
+                     Background="#AA000000"
+                     TextAlignment="Right"
+                     IsHitTestVisible="False" />
         </Grid>
       </Border>
 
@@ -120,13 +141,45 @@
         <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,6">
           <Button Content="Up" Command="{Binding LayerUpCommand}" Width="40" Margin="0,0,4,0" />
           <Button Content="Down" Command="{Binding LayerDownCommand}" Width="48" Margin="0,0,4,0" />
+          <Button Content="Copy" Command="{Binding CopySelectedLayerCommand}" Width="48" Margin="0,0,4,0" />
           <Button Content="Remove" Command="{Binding RemoveSelectedLayerCommand}" />
         </StackPanel>
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,6">
+          <Button Content="Group" Command="{Binding AddLayerGroupCommand}" Margin="0,0,4,0"
+                  ToolTip="Create group from marked layers (left checkboxes)" />
+          <Button Content="Assign" Command="{Binding AssignMarkedToGroupCommand}" Margin="0,0,4,0"
+                  ToolTip="Move marked layers into the selected group" />
+          <Button Content="Ungroup" Command="{Binding DeleteSelectedGroupCommand}" Margin="0,0,4,0"
+                  ToolTip="Delete selected group (layers become ungrouped)" />
+        </StackPanel>
+        <TextBlock DockPanel.Dock="Top" Margin="0,0,0,4" FontSize="11" Foreground="#AAA"
+                   Text="Left = select for group · Right = visible" />
 
-        <ListBox DockPanel.Dock="Top" Height="160"
-                 ItemsSource="{Binding Layers}"
-                 SelectedItem="{Binding SelectedLayer}"
-                 DisplayMemberPath="Name" Margin="0,0,0,8" />
+        <TreeView DockPanel.Dock="Top" Height="200"
+                  ItemsSource="{Binding LayerTree}"
+                  SelectedItemChanged="LayerTree_SelectedItemChanged"
+                  Margin="0,0,0,8">
+          <TreeView.ItemTemplate>
+            <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+              <DockPanel LastChildFill="True" MinHeight="22">
+                <CheckBox DockPanel.Dock="Left"
+                          IsChecked="{Binding Marked, Mode=TwoWay}"
+                          VerticalAlignment="Center"
+                          Margin="0,0,6,0"
+                          ToolTip="Select for grouping" />
+                <CheckBox DockPanel.Dock="Right"
+                          IsChecked="{Binding Visible, Mode=TwoWay}"
+                          VerticalAlignment="Center"
+                          Margin="6,0,0,0"
+                          ToolTip="Visible" />
+                <TextBlock Text="{Binding DisplayLabel}"
+                           VerticalAlignment="Center"
+                           Foreground="White"
+                           TextTrimming="CharacterEllipsis" />
+              </DockPanel>
+            </HierarchicalDataTemplate>
+          </TreeView.ItemTemplate>
+        </TreeView>
 
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel>
@@ -236,7 +289,7 @@
               </Grid.ColumnDefinitions>
               <Grid.RowDefinitions>
                 <RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition />
-                <RowDefinition /><RowDefinition /><RowDefinition />
+                <RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition />
               </Grid.RowDefinitions>
 
               <TextBlock Grid.Row="0" Text="X" VerticalAlignment="Center" Foreground="White" />
@@ -253,9 +306,34 @@
               <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding SelectedLayer.NativeWidth}" Margin="0,2" Foreground="White" />
               <TextBlock Grid.Row="6" Text="Native H" VerticalAlignment="Center" Foreground="White" />
               <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding SelectedLayer.NativeHeight}" Margin="0,2" Foreground="White" />
+              <TextBlock Grid.Row="7" Text="Gruppe" VerticalAlignment="Center" Foreground="White" />
+              <ComboBox Grid.Row="7" Grid.Column="1"
+                        ItemsSource="{Binding GroupChoices}"
+                        SelectedItem="{Binding SelectedGroupChoice}"
+                        DisplayMemberPath="Name"
+                        Margin="0,2" />
             </Grid>
 
-            <CheckBox Content="Visible" IsChecked="{Binding SelectedLayer.Visible}" Margin="0,0,0,12" />
+            <CheckBox Content="Visible" IsChecked="{Binding SelectedLayer.Visible}" Margin="0,0,0,8" />
+            <CheckBox Content="Black Key"
+                      IsChecked="{Binding SelectedLayer.BlackKeyEnabled}"
+                      Margin="0,0,0,4" />
+            <Grid Margin="0,0,0,12">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="70" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="44" />
+              </Grid.ColumnDefinitions>
+              <TextBlock Text="Schwelle" VerticalAlignment="Center" Foreground="White" />
+              <Slider Grid.Column="1"
+                      Minimum="0" Maximum="1" TickFrequency="0.01"
+                      Value="{Binding SelectedLayer.BlackKeyThreshold}"
+                      VerticalAlignment="Center" Margin="4,2"
+                      IsEnabled="{Binding SelectedLayer.BlackKeyEnabled}" />
+              <TextBlock Grid.Column="2"
+                         Text="{Binding SelectedLayer.BlackKeyThreshold, StringFormat={}{0:0.00}}"
+                         VerticalAlignment="Center" Foreground="White" />
+            </Grid>
 
             <Separator Margin="0,0,0,8" />
             <TextBlock Text="NDI Output" FontWeight="SemiBold" Margin="0,0,0,4" Foreground="White" />
@@ -268,6 +346,9 @@
                       Margin="0,0,0,4" />
             <CheckBox Content="auch im NDI-Ausgang"
                       IsChecked="{Binding ShowBackgroundInOutput}"
+                      Margin="0,0,0,8" />
+            <CheckBox Content="Layer-Rahmen (grün/gelb)"
+                      IsChecked="{Binding ShowLayerOverlays}"
                       Margin="0,0,0,12" />
 
             <StackPanel Orientation="Horizontal">

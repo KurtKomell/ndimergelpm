@@ -23,9 +23,22 @@
     <ProjectReference Include="..\NdiMerger.Output\NdiMerger.Output.csproj" />
   </ItemGroup>
 
+  <!-- Safety net if WebView2.targets still flows transitively. -->
+  <Target Name="RemoveWebView2Wpf" BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="$([System.String]::Copy('%(Identity)').Contains('WebView2.Wpf'))" />
+    </ItemGroup>
+  </Target>
+
   <ItemGroup>
     <None Include="..\..\assets\**\*" Link="assets\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\libs\Processing.NDI.Lib.x64.dll" Link="Processing.NDI.Lib.x64.dll" CopyToOutputDirectory="PreserveNewest" />
+    <!-- WebView2Loader must sit next to the EXE; the package targets would copy it, but we keep those off to avoid WPF. -->
+    <None Include="$(NuGetPackageRoot)microsoft.web.webview2\1.0.3537.50\runtimes\win-x64\native\WebView2Loader.dll"
+          Condition="Exists('$(NuGetPackageRoot)microsoft.web.webview2\1.0.3537.50\runtimes\win-x64\native\WebView2Loader.dll')"
+          Link="WebView2Loader.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Visible="false" />
   </ItemGroup>
 
 </Project>

@@ -74,6 +74,7 @@ public sealed class NdiVideoSource : BgraUploadSource
     public NdiVideoSource(string sourceName)
     {
         _sourceName = sourceName;
+        ForceOpaqueAlpha = false; // NDI BGRX already stores opaque alpha
     }
 
     public override void Start(GpuDevice gpu)
@@ -120,12 +121,7 @@ public sealed class NdiVideoSource : BgraUploadSource
                 {
                     case NDIlib.frame_type_e.frame_type_video when video.p_data != IntPtr.Zero:
                     {
-                        int w = video.xres;
-                        int h = video.yres;
-                        int stride = video.line_stride_in_bytes;
-                        var buffer = new byte[stride * h];
-                        Marshal.Copy(video.p_data, buffer, 0, buffer.Length);
-                        SubmitFrame(buffer, w, h, stride);
+                        SubmitFrameFromPtr(video.p_data, video.xres, video.yres, video.line_stride_in_bytes);
                         NDIlib.recv_free_video_v2(_recv, ref video);
                         break;
                     }

@@ -5,10 +5,11 @@ namespace NdiMerger.Core.Models;
 
 public sealed class LayoutDocument
 {
-    public string Version { get; set; } = "1.1";
+    public string Version { get; set; } = "1.2";
     public string OutputName { get; set; } = "MAM-Pixelmap";
     public bool ShowBackgroundInOutput { get; set; } = false;
     public bool ShowBackgroundInPreview { get; set; } = true;
+    public bool ShowLayerOverlays { get; set; } = true;
     public bool NdiSending { get; set; } = true;
     public ScaleMode SelectedScaleMode { get; set; } = ScaleMode.Native;
     public string? SelectedZoneId { get; set; }
@@ -21,6 +22,7 @@ public sealed class LayoutDocument
     public float? FloorReflectionLength { get; set; }
     public float? FloorReflectionAngle { get; set; }
     public float? FloorReflectionFadeStart { get; set; }
+    public List<LayoutGroupEntry> Groups { get; set; } = [];
     public List<LayoutLayerEntry> Layers { get; set; } = [];
 }
 
@@ -32,6 +34,15 @@ public sealed class AppSession
     public double WindowWidth { get; set; }
     public double WindowHeight { get; set; }
     public int WindowState { get; set; }
+}
+
+public sealed class LayoutGroupEntry
+{
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "Group";
+    public bool Visible { get; set; } = true;
+    public bool IsExpanded { get; set; } = true;
+    public int SortOrder { get; set; }
 }
 
 public sealed class LayoutLayerEntry
@@ -46,10 +57,13 @@ public sealed class LayoutLayerEntry
     public float Opacity { get; set; } = 1f;
     public ScaleMode ScaleMode { get; set; } = ScaleMode.Native;
     public string? ZoneId { get; set; }
+    public string? GroupId { get; set; }
     public bool Visible { get; set; } = true;
     public int ZIndex { get; set; }
     public int NativeWidth { get; set; }
     public int NativeHeight { get; set; }
+    public bool BlackKeyEnabled { get; set; }
+    public float BlackKeyThreshold { get; set; } = 0.08f;
 }
 
 public static class LayoutSerializer
@@ -68,9 +82,11 @@ public static class LayoutSerializer
 
     public static LayoutDocument FromLayers(
         IEnumerable<CompositionLayer> layers,
+        IEnumerable<LayerGroup> groups,
         string outputName,
         bool showBgOutput,
         bool showBgPreview = true,
+        bool showLayerOverlays = true,
         bool ndiSending = true,
         ScaleMode selectedScaleMode = ScaleMode.Native,
         string? selectedZoneId = null,
@@ -86,9 +102,11 @@ public static class LayoutSerializer
     {
         return new LayoutDocument
         {
+            Version = "1.2",
             OutputName = outputName,
             ShowBackgroundInOutput = showBgOutput,
             ShowBackgroundInPreview = showBgPreview,
+            ShowLayerOverlays = showLayerOverlays,
             NdiSending = ndiSending,
             SelectedScaleMode = selectedScaleMode,
             SelectedZoneId = selectedZoneId,
@@ -101,6 +119,14 @@ public static class LayoutSerializer
             FloorReflectionLength = floorReflectionLength,
             FloorReflectionAngle = floorReflectionAngle,
             FloorReflectionFadeStart = floorReflectionFadeStart,
+            Groups = groups.OrderBy(g => g.SortOrder).Select(g => new LayoutGroupEntry
+            {
+                Id = g.Id.ToString("N"),
+                Name = g.Name,
+                Visible = g.Visible,
+                IsExpanded = g.IsExpanded,
+                SortOrder = g.SortOrder
+            }).ToList(),
             Layers = layers.Select(l => new LayoutLayerEntry
             {
                 Name = l.Name,
@@ -113,10 +139,13 @@ public static class LayoutSerializer
                 Opacity = l.Opacity,
                 ScaleMode = l.ScaleMode,
                 ZoneId = l.ZoneId,
+                GroupId = l.GroupId?.ToString("N"),
                 Visible = l.Visible,
                 ZIndex = l.ZIndex,
                 NativeWidth = l.NativeWidth,
-                NativeHeight = l.NativeHeight
+                NativeHeight = l.NativeHeight,
+                BlackKeyEnabled = l.BlackKeyEnabled,
+                BlackKeyThreshold = l.BlackKeyThreshold
             }).ToList()
         };
     }

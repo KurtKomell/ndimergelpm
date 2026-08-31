@@ -220,7 +220,7 @@ public static class WallCarousel
         var zone = BuildTargetZone(group, zones);
         CompositionLayer? best = null;
         float bestArea = 0f;
-        foreach (var layer in layers.Where(l => !IsMovingCopy(l) && l.Visible))
+        foreach (var layer in layers.Where(l => !IsMovingCopy(l) && l.IsEffectivelyVisible))
         {
             if (!IsLayerCenterInZone(layer, zone))
                 continue;
@@ -278,9 +278,12 @@ public static class WallCarousel
             ScaleMode = source.ScaleMode,
             ZoneId = null,
             Visible = true,
+            ParentGroupVisible = true,
             ZIndex = source.ZIndex + 1,
             NativeWidth = source.NativeWidth,
-            NativeHeight = source.NativeHeight
+            NativeHeight = source.NativeHeight,
+            BlackKeyEnabled = source.BlackKeyEnabled,
+            BlackKeyThreshold = source.BlackKeyThreshold
         };
     }
 

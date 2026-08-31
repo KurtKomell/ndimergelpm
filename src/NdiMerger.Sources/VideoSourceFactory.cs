@@ -13,6 +13,7 @@ public static class VideoSourceFactory
             SourceKind.Spout => new SpoutVideoSource(discovered.Key),
             SourceKind.Capture => new CaptureVideoSource(discovered.Key, discovered.DisplayName),
             SourceKind.Solid => CreateSolid(discovered.Key, discovered.DisplayName),
+            SourceKind.Browser => new BrowserVideoSource(discovered.Key, discovered.DisplayName),
             _ => throw new ArgumentOutOfRangeException()
         };
     }
@@ -25,6 +26,7 @@ public static class VideoSourceFactory
             SourceKind.Spout => new SpoutVideoSource(key),
             SourceKind.Capture => new CaptureVideoSource(key, displayName ?? key),
             SourceKind.Solid => CreateSolid(key, displayName),
+            SourceKind.Browser => new BrowserVideoSource(key, displayName),
             _ => throw new ArgumentOutOfRangeException(nameof(kind))
         };
     }
@@ -83,7 +85,15 @@ public sealed class SourceRuntimeHub : IDisposable
                 throw new InvalidOperationException("GPU not attached.");
 
             var source = VideoSourceFactory.Create(kind, key, displayName);
-            source.Start(_gpu);
+            try
+            {
+                source.Start(_gpu);
+            }
+            catch
+            {
+                source.Dispose();
+                throw;
+            }
             _sources[id] = source;
             return source;
         }

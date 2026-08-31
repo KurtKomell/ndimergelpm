@@ -9,6 +9,7 @@ using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Win32;
+using NdiMerger.App;
 using NdiMerger.Core;
 using NdiMerger.Core.Gpu;
 using NdiMerger.Core.Models;
@@ -26,7 +27,6 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private Thread? _renderThread;
     private volatile bool _renderExit;
     private volatile bool _disposed;
-    private byte[]? _previewUiBuffer;
     private volatile bool _previewDirty;
     private double _renderFps;
     private int _previewFrameCounter;
@@ -37,9 +37,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private NdiOutputSender? _ndiOut;
     private PixelMapDefinition _pixelMap = new();
     private byte[]? _previewBuffer;
+    private byte[]? _previewUiBuffer;
+    private byte[]? _previewPresentBuffer;
     private WriteableBitmap? _previewBitmap;
     private DateTime _lastFpsTime = DateTime.UtcNow;
     private int _frameCounter;
+    private volatile string? _pendingStatus;
     private CompositionLayer? _dragLayer;
     private Point _dragStartMouse;
     private float _dragStartX;
@@ -51,10 +54,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     public ObservableCollection<DiscoveredSource> AvailableSources { get; } = [];
     public ObservableCollection<CompositionLayer> Layers { get; } = [];
+    public ObservableCollection<LayerGroup> Groups { get; } = [];
+    public ObservableCollection<LayerTreeNode> LayerTree { get; } = [];
     public ObservableCollection<ZoneDefinition> Zones { get; } = [];
+    public ObservableCollection<GroupChoice> GroupChoices { get; } = [];
 
     [ObservableProperty] private ImageSource? _previewImage;
     [ObservableProperty] private CompositionLayer? _selectedLayer;
+    [ObservableProperty] private LayerTreeNode? _selectedTreeNode;
     [ObservableProperty] private DiscoveredSource? _selectedSource;
     [ObservableProperty] private ZoneDefinition? _selectedZone;
     [ObservableProperty] private ScaleMode _selectedScaleMode = ScaleMode.Native;
@@ -62,6 +69,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private bool _ndiSending = true;
     [ObservableProperty] private bool _showBackgroundInPreview = true;
     [ObservableProperty] private bool _showBackgroundInOutput = false;
+    [ObservableProperty] private bool _showLayerOverlays = true;
+    [ObservableProperty] private string _selectedSourceHud = "";
     [ObservableProperty] private string _statusText = "Starting…";
     [ObservableProperty] private double _fps;
     [ObservableProperty] private string _canvasInfo = "";
@@ -77,6 +86,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private double _floorReflectionLength = 0.4;
     [ObservableProperty] private double _floorReflectionAngle = 0.35;
     [ObservableProperty] private double _floorReflectionFadeStart = 0;
+    [ObservableProperty] private GroupChoice? _selectedGroupChoice;
 
     public Array ScaleModes { get; } = Enum.GetValues(typeof(ScaleMode));
     public IReadOnlyList<CarouselDirectionChoice> CarouselDirections =>
@@ -112,6 +122,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 OutputName = savedLayout.OutputName;
                 ShowBackgroundInOutput = savedLayout.ShowBackgroundInOutput;
                 ShowBackgroundInPreview = savedLayout.ShowBackgroundInPreview;
+                ShowLayerOverlays = savedLayout.ShowLayerOverlays;
                 NdiSending = savedLayout.NdiSending;
                 SelectedScaleMode = savedLayout.SelectedScaleMode;
                 CarouselDurationSeconds = Math.Clamp(savedLayout.CarouselDurationSeconds, 0.3, 5.0);
@@ -136,6 +147,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             _compositor = new PixelMapCompositor(_gpu, _pixelMap.CanvasWidth, _pixelMap.CanvasHeight);
             _previewBuffer = new byte[_compositor.PreviewWidth * _compositor.PreviewHeight * 4];
             _previewUiBuffer = new byte[_previewBuffer.Length];
+            _previewPresentBuffer = new byte[_previewBuffer.Length];
             _previewBitmap = new WriteableBitmap(
                 _compositor.PreviewWidth, _compositor.PreviewHeight, 96, 96,
                 PixelFormats.Bgra32, null);
@@ -232,10 +244,39 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     {
         if (SelectedSource is null || _gpu is null) return;
         var src = SelectedSource;
+        AddLayerFromSource(src.Kind, src.Key, src.DisplayName, src.Width, src.Height);
+    }
+
+    [RelayCommand]
+    private void AddBrowserSource()
+    {
+        if (_gpu is null) return;
+
+        var dialog = new BrowserSourceDialog
+        {
+            Owner = Application.Current?.MainWindow
+        };
+        if (dialog.ShowDialog() != true)
+            return;
+
+        try
+        {
+            var spec = BrowserSourceSpec.Create(dialog.Url, dialog.WidthPx, dialog.HeightPx);
+            AddLayerFromSource(SourceKind.Browser, spec.Key, spec.DisplayName, spec.Width, spec.Height);
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Browser source failed: {ex.Message}";
+            MessageBox.Show(ex.Message, "Browser Source", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private void AddLayerFromSource(SourceKind kind, string key, string displayName, int discoveredW = 0, int discoveredH = 0)
+    {
         IVideoSource runtime;
         try
         {
-            runtime = _hub.GetOrCreate(src.Kind, src.Key, src.DisplayName);
+            runtime = _hub.GetOrCreate(kind, key, displayName);
             for (int i = 0; i < 30 && runtime.Width <= 0; i++)
             {
                 runtime.Update();
@@ -245,17 +286,17 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
         catch (Exception ex)
         {
-            StatusText = $"Source failed ({src.DisplayName}): {ex.Message}";
+            StatusText = $"Source failed ({displayName}): {ex.Message}";
             return;
         }
 
-        var (nativeW, nativeH) = ResolveNativeSize(src.Kind, src.Key, src.DisplayName, runtime, src.Width, src.Height);
+        var (nativeW, nativeH) = ResolveNativeSize(kind, key, displayName, runtime, discoveredW, discoveredH);
 
         var layer = new CompositionLayer
         {
-            Name = src.DisplayName,
-            SourceKind = src.Kind,
-            SourceKey = src.Key,
+            Name = displayName,
+            SourceKind = kind,
+            SourceKey = key,
             ZIndex = Layers.Count,
             NativeWidth = nativeW,
             NativeHeight = nativeH,
@@ -268,7 +309,135 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
         Layers.Add(layer);
         SelectedLayer = layer;
+        RebuildLayerTree();
     }
+
+    [RelayCommand]
+    private void CopySelectedLayer()
+    {
+        if (SelectedLayer is null || _gpu is null) return;
+        var src = SelectedLayer;
+
+        try
+        {
+            _hub.GetOrCreate(src.SourceKind, src.SourceKey, src.Name);
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Copy failed ({src.Name}): {ex.Message}";
+            return;
+        }
+
+        var copy = new CompositionLayer
+        {
+            Name = src.Name.EndsWith(" (copy)", StringComparison.Ordinal)
+                ? src.Name
+                : src.Name + " (copy)",
+            SourceKind = src.SourceKind,
+            SourceKey = src.SourceKey,
+            X = src.X + 40,
+            Y = src.Y + 40,
+            Scale = src.Scale,
+            RotationDegrees = src.RotationDegrees,
+            Opacity = src.Opacity,
+            ScaleMode = ScaleMode.Native,
+            ZoneId = null,
+            GroupId = src.GroupId,
+            Visible = src.Visible,
+            ParentGroupVisible = src.ParentGroupVisible,
+            ZIndex = Layers.Count,
+            NativeWidth = src.NativeWidth,
+            NativeHeight = src.NativeHeight,
+            BlackKeyEnabled = src.BlackKeyEnabled,
+            BlackKeyThreshold = src.BlackKeyThreshold
+        };
+
+        Layers.Add(copy);
+        SelectedLayer = copy;
+        RebuildLayerTree();
+        StatusText = $"Copied {src.Name}";
+    }
+
+    [RelayCommand]
+    private void AddLayerGroup()
+    {
+        var members = GetMarkedLayers();
+        if (members.Count == 0 && SelectedLayer is not null)
+            members = [SelectedLayer];
+
+        var group = new LayerGroup
+        {
+            Name = $"Group {Groups.Count + 1}",
+            SortOrder = Groups.Count,
+            Visible = true,
+            IsExpanded = true
+        };
+        group.PropertyChanged += OnGroupPropertyChanged;
+        Groups.Add(group);
+
+        foreach (var layer in members)
+        {
+            layer.GroupId = group.Id;
+            layer.ParentGroupVisible = group.Visible;
+            layer.MarkedForGroup = false;
+        }
+
+        RebuildLayerTree();
+        StatusText = members.Count > 0
+            ? $"Created {group.Name} ({members.Count} layer{(members.Count == 1 ? "" : "s")})"
+            : $"Created {group.Name} — mark layers with the left checkbox, then Group again";
+    }
+
+    [RelayCommand]
+    private void AssignMarkedToGroup()
+    {
+        LayerGroup? target = null;
+        if (SelectedTreeNode is { IsGroup: true, Group: not null })
+            target = SelectedTreeNode.Group;
+        else if (SelectedGroupChoice?.Id is Guid gid)
+            target = Groups.FirstOrDefault(g => g.Id == gid);
+
+        if (target is null)
+        {
+            StatusText = "Select a group (or choose Gruppe), mark layers, then Assign.";
+            return;
+        }
+
+        var members = GetMarkedLayers();
+        if (members.Count == 0 && SelectedLayer is not null)
+            members = [SelectedLayer];
+
+        if (members.Count == 0)
+        {
+            StatusText = "Mark layers with the left checkbox first.";
+            return;
+        }
+
+        foreach (var layer in members)
+        {
+            layer.GroupId = target.Id;
+            layer.ParentGroupVisible = target.Visible;
+            layer.MarkedForGroup = false;
+        }
+
+        RebuildLayerTree();
+        StatusText = $"Assigned {members.Count} layer(s) to {target.Name}";
+    }
+
+    [RelayCommand]
+    private void ClearLayerMarks()
+    {
+        foreach (var layer in Layers)
+            layer.MarkedForGroup = false;
+        foreach (var node in LayerTree)
+        {
+            if (node.IsGroup)
+                node.Marked = false;
+        }
+    }
+
+    private List<CompositionLayer> GetMarkedLayers() =>
+        Layers.Where(l => !WallCarousel.IsMovingCopy(l) && l.MarkedForGroup).ToList();
 
     [RelayCommand]
     private void RemoveSelectedLayer()
@@ -277,6 +446,31 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         Layers.Remove(SelectedLayer);
         SelectedLayer = null;
         Reindex();
+        RebuildLayerTree();
+    }
+
+    [RelayCommand]
+    private void DeleteSelectedGroup()
+    {
+        LayerGroup? group = null;
+        if (SelectedTreeNode is { IsGroup: true, Group: not null })
+            group = SelectedTreeNode.Group;
+        else if (SelectedLayer?.GroupId is Guid gid)
+            group = Groups.FirstOrDefault(g => g.Id == gid);
+
+        if (group is null) return;
+
+        foreach (var layer in Layers.Where(l => l.GroupId == group.Id))
+        {
+            layer.GroupId = null;
+            layer.ParentGroupVisible = true;
+        }
+
+        group.PropertyChanged -= OnGroupPropertyChanged;
+        Groups.Remove(group);
+        ReindexGroups();
+        RebuildLayerTree();
+        StatusText = $"Removed group {group.Name}";
     }
 
     [RelayCommand]
@@ -288,6 +482,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         {
             Layers.Move(i, i + 1);
             Reindex();
+            RebuildLayerTree();
         }
     }
 
@@ -300,6 +495,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         {
             Layers.Move(i, i - 1);
             Reindex();
+            RebuildLayerTree();
         }
     }
 
@@ -501,6 +697,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
 
         Reindex();
+        RebuildLayerTree();
     }
 
     /// <summary>
@@ -569,9 +766,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
         return LayoutSerializer.FromLayers(
             Layers.Where(l => !WallCarousel.IsMovingCopy(l)),
+            Groups,
             OutputName,
             ShowBackgroundInOutput,
             ShowBackgroundInPreview,
+            ShowLayerOverlays,
             NdiSending,
             SelectedScaleMode,
             SelectedZone?.Id,
@@ -591,6 +790,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         OutputName = doc.OutputName;
         ShowBackgroundInOutput = doc.ShowBackgroundInOutput;
         ShowBackgroundInPreview = doc.ShowBackgroundInPreview;
+        ShowLayerOverlays = doc.ShowLayerOverlays;
         NdiSending = doc.NdiSending;
         SelectedScaleMode = doc.SelectedScaleMode;
         CarouselDurationSeconds = Math.Clamp(doc.CarouselDurationSeconds, 0.3, 5.0);
@@ -616,6 +816,26 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     private void ApplyLayers(LayoutDocument doc)
     {
+        foreach (var g in Groups)
+            g.PropertyChanged -= OnGroupPropertyChanged;
+        Groups.Clear();
+
+        foreach (var ge in doc.Groups.OrderBy(g => g.SortOrder))
+        {
+            if (!Guid.TryParse(ge.Id, out var gid))
+                gid = Guid.NewGuid();
+            var group = new LayerGroup
+            {
+                Id = gid,
+                Name = string.IsNullOrWhiteSpace(ge.Name) ? "Group" : ge.Name,
+                Visible = ge.Visible,
+                IsExpanded = ge.IsExpanded,
+                SortOrder = ge.SortOrder
+            };
+            group.PropertyChanged += OnGroupPropertyChanged;
+            Groups.Add(group);
+        }
+
         Layers.Clear();
         foreach (var e in doc.Layers.OrderBy(l => l.ZIndex))
         {
@@ -632,6 +852,20 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             int nativeW = resolved.Width > 0 ? resolved.Width : Math.Max(e.NativeWidth, 1920);
             int nativeH = resolved.Height > 0 ? resolved.Height : Math.Max(e.NativeHeight, 1080);
 
+            Guid? groupId = null;
+            if (!string.IsNullOrEmpty(e.GroupId) && Guid.TryParse(e.GroupId, out var parsed))
+                groupId = parsed;
+
+            bool parentVisible = true;
+            if (groupId is Guid gid)
+            {
+                var group = Groups.FirstOrDefault(g => g.Id == gid);
+                if (group is null)
+                    groupId = null;
+                else
+                    parentVisible = group.Visible;
+            }
+
             Layers.Add(new CompositionLayer
             {
                 Name = e.Name,
@@ -644,10 +878,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 Opacity = e.Opacity,
                 ScaleMode = e.ScaleMode,
                 ZoneId = e.ZoneId,
+                GroupId = groupId,
+                ParentGroupVisible = parentVisible,
                 Visible = e.Visible,
                 ZIndex = e.ZIndex,
                 NativeWidth = nativeW,
-                NativeHeight = nativeH
+                NativeHeight = nativeH,
+                BlackKeyEnabled = e.BlackKeyEnabled,
+                BlackKeyThreshold = e.BlackKeyThreshold > 0 ? e.BlackKeyThreshold : 0.08f
             });
         }
 
@@ -656,6 +894,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             SelectedLayer = Layers.FirstOrDefault(l =>
                 LayoutSerializer.LayerKey(l.SourceKind, l.SourceKey) == doc.SelectedLayerKey);
         }
+
+        RebuildLayerTree();
     }
 
     private static (int Width, int Height) ResolveNativeSize(
@@ -677,6 +917,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
         if (kind == SourceKind.Solid)
             return (SolidColorVideoSource.DefaultWidth, SolidColorVideoSource.DefaultHeight);
+
+        if (kind == SourceKind.Browser && BrowserSourceSpec.TryParse(key, out var browser))
+            return (browser.Width, browser.Height);
 
         if (TryParseSizeFromDisplayName(displayName, out var pw, out var ph))
             return (pw, ph);
@@ -716,19 +959,238 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             Layers[i].ZIndex = i;
     }
 
+    private void ReindexGroups()
+    {
+        for (int i = 0; i < Groups.Count; i++)
+            Groups[i].SortOrder = i;
+    }
+
+    private void OnGroupPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (sender is not LayerGroup group) return;
+        if (e.PropertyName == nameof(LayerGroup.Visible))
+            SyncParentGroupVisible(group);
+        if (e.PropertyName is nameof(LayerGroup.Name) or nameof(LayerGroup.Visible))
+            RefreshGroupChoices();
+    }
+
+    private void SyncParentGroupVisible(LayerGroup group)
+    {
+        foreach (var layer in Layers.Where(l => l.GroupId == group.Id))
+            layer.ParentGroupVisible = group.Visible;
+    }
+
+    private void RebuildLayerTree()
+    {
+        LayerTree.Clear();
+        RefreshGroupChoices();
+
+        foreach (var group in Groups.OrderBy(g => g.SortOrder))
+        {
+            var node = new LayerTreeNode(group);
+            foreach (var layer in Layers
+                         .Where(l => !WallCarousel.IsMovingCopy(l) && l.GroupId == group.Id)
+                         .OrderBy(l => l.ZIndex))
+            {
+                node.Children.Add(new LayerTreeNode(layer));
+            }
+
+            LayerTree.Add(node);
+        }
+
+        foreach (var layer in Layers
+                     .Where(l => !WallCarousel.IsMovingCopy(l) && l.GroupId is null)
+                     .OrderBy(l => l.ZIndex))
+        {
+            LayerTree.Add(new LayerTreeNode(layer));
+        }
+
+        SyncSelectedTreeNode();
+    }
+
+    private void RefreshGroupChoices()
+    {
+        var previousId = SelectedGroupChoice?.Id;
+        _suppressGroupChoiceAssign = true;
+        try
+        {
+            GroupChoices.Clear();
+            GroupChoices.Add(new GroupChoice(null, "(none)"));
+            foreach (var g in Groups.OrderBy(g => g.SortOrder))
+                GroupChoices.Add(new GroupChoice(g.Id, g.Name));
+
+            SelectedGroupChoice = GroupChoices.FirstOrDefault(c => c.Id == previousId)
+                                  ?? GroupChoices.FirstOrDefault();
+        }
+        finally
+        {
+            _suppressGroupChoiceAssign = false;
+        }
+    }
+
+    private void SyncSelectedTreeNode()
+    {
+        if (SelectedLayer is null)
+        {
+            SelectedTreeNode = null;
+            return;
+        }
+
+        foreach (var node in LayerTree)
+        {
+            if (!node.IsGroup && ReferenceEquals(node.Layer, SelectedLayer))
+            {
+                SelectedTreeNode = node;
+                return;
+            }
+
+            foreach (var child in node.Children)
+            {
+                if (ReferenceEquals(child.Layer, SelectedLayer))
+                {
+                    SelectedTreeNode = child;
+                    return;
+                }
+            }
+        }
+    }
+
+    partial void OnSelectedTreeNodeChanged(LayerTreeNode? value)
+    {
+        if (value is { IsGroup: false, Layer: not null })
+        {
+            if (!ReferenceEquals(SelectedLayer, value.Layer))
+                SelectedLayer = value.Layer;
+        }
+    }
+
+    private CompositionLayer? _hudLayer;
+    private bool _suppressGroupChoiceAssign;
+
+    partial void OnSelectedLayerChanged(CompositionLayer? value)
+    {
+        if (_hudLayer is not null)
+            _hudLayer.PropertyChanged -= OnSelectedLayerPropertyChanged;
+        _hudLayer = value;
+        if (_hudLayer is not null)
+            _hudLayer.PropertyChanged += OnSelectedLayerPropertyChanged;
+
+        UpdateSelectedSourceHud();
+        SyncSelectedTreeNode();
+        SyncGroupChoiceFromLayer();
+    }
+
+    private void OnSelectedLayerPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(CompositionLayer.Name)
+            or nameof(CompositionLayer.NativeWidth)
+            or nameof(CompositionLayer.NativeHeight))
+        {
+            UpdateSelectedSourceHud();
+        }
+    }
+
+    private void UpdateSelectedSourceHud()
+    {
+        if (SelectedLayer is null)
+        {
+            SelectedSourceHud = "";
+            return;
+        }
+
+        SelectedSourceHud = $"{SelectedLayer.Name}\n{SelectedLayer.NativeWidth}×{SelectedLayer.NativeHeight}";
+    }
+
+    private void SyncGroupChoiceFromLayer()
+    {
+        _suppressGroupChoiceAssign = true;
+        try
+        {
+            if (SelectedLayer is null)
+            {
+                SelectedGroupChoice = GroupChoices.FirstOrDefault();
+                return;
+            }
+
+            SelectedGroupChoice = GroupChoices.FirstOrDefault(c => c.Id == SelectedLayer.GroupId)
+                                  ?? GroupChoices.FirstOrDefault();
+        }
+        finally
+        {
+            _suppressGroupChoiceAssign = false;
+        }
+    }
+
+    partial void OnSelectedGroupChoiceChanged(GroupChoice? value)
+    {
+        if (_suppressGroupChoiceAssign) return;
+        if (SelectedLayer is null || value is null) return;
+        if (SelectedLayer.GroupId == value.Id) return;
+
+        SelectedLayer.GroupId = value.Id;
+        if (value.Id is Guid gid)
+        {
+            var group = Groups.FirstOrDefault(g => g.Id == gid);
+            SelectedLayer.ParentGroupVisible = group?.Visible ?? true;
+        }
+        else
+        {
+            SelectedLayer.ParentGroupVisible = true;
+        }
+
+        RebuildLayerTree();
+    }
+
     private void UiTick()
     {
         TickWallCarousel();
 
-        if (_previewDirty && _previewBitmap is not null && _previewUiBuffer is not null && _compositor is not null)
+        // Apply status on the UI thread without BeginInvoke storms from the render loop.
+        var status = _pendingStatus;
+        if (status is not null && !CarouselBusy)
         {
+            _pendingStatus = null;
+            if (status == "fps")
+            {
+                var conns = _ndiOut?.ConnectionCount ?? 0;
+                var ndiRes = _ndiOut is { IsActive: true }
+                    ? $"{_ndiOut.OutputWidth}×{_ndiOut.OutputHeight}"
+                    : "off";
+                var bufMb = _ndiOut?.BufferSizeBytes > 0
+                    ? $"{_ndiOut.BufferSizeBytes / (1024.0 * 1024.0):0} MB/frame"
+                    : NdiFrameSpec.FormatBufferSizeMb();
+                var ndiBw = _ndiOut is { IsActive: true } && _ndiOut.SendBytesPerSecond > 0
+                    ? NdiFrameSpec.FormatBandwidthGb(_ndiOut.SendBytesPerSecond)
+                    : "—";
+                StatusText =
+                    $"FPS {_renderFps:0.0} | NDI {ndiRes} {ndiBw} | {bufMb} | viewers={conns} | Layers={Layers.Count}";
+            }
+            else
+            {
+                StatusText = status;
+            }
+        }
+
+        if (_previewDirty && _previewBitmap is not null && _previewUiBuffer is not null &&
+            _previewPresentBuffer is not null && _compositor is not null)
+        {
+            int w = _compositor.PreviewWidth;
+            int h = _compositor.PreviewHeight;
+            int bytes = w * h * 4;
+            bool present = false;
+            // Hold the render lock only for a tiny memcpy — never during WritePixels (WPF).
             lock (_renderLock)
             {
-                _previewBitmap.WritePixels(
-                    new Int32Rect(0, 0, _compositor.PreviewWidth, _compositor.PreviewHeight),
-                    _previewUiBuffer, _compositor.PreviewWidth * 4, 0);
-                _previewDirty = false;
+                if (_previewDirty)
+                {
+                    Buffer.BlockCopy(_previewUiBuffer, 0, _previewPresentBuffer, 0, bytes);
+                    _previewDirty = false;
+                    present = true;
+                }
             }
+
+            if (present)
+                _previewBitmap.WritePixels(new Int32Rect(0, 0, w, h), _previewPresentBuffer, w * 4, 0);
         }
 
         Fps = _renderFps;
@@ -736,8 +1198,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     private void RenderLoop()
     {
+        // Cap at 60 Hz when compose is cheap so we do not starve WebView2 / DWM on the GPU
+        // without showing as "100% load". If a frame already takes longer (NDI readback), do not wait.
+        const double targetFrameMs = 1000.0 / 60.0;
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+
         while (!_renderExit)
         {
+            double startMs = watch.Elapsed.TotalMilliseconds;
             try
             {
                 RenderFrame();
@@ -750,6 +1218,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             {
                 // keep loop alive; errors surface via StatusText on next successful frame
             }
+
+            double remaining = targetFrameMs - (watch.Elapsed.TotalMilliseconds - startMs);
+            if (remaining >= 1.0)
+                Thread.Sleep((int)remaining);
         }
     }
 
@@ -833,32 +1305,15 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 _renderFps = _frameCounter / dt;
                 _frameCounter = 0;
                 _lastFpsTime = now;
-
-                var conns = _ndiOut?.ConnectionCount ?? 0;
-                var ndiRes = _ndiOut is { IsActive: true }
-                    ? $"{_ndiOut.OutputWidth}×{_ndiOut.OutputHeight}"
-                    : "off";
-                var bufMb = _ndiOut?.BufferSizeBytes > 0
-                    ? $"{_ndiOut.BufferSizeBytes / (1024.0 * 1024.0):0} MB/frame"
-                    : NdiFrameSpec.FormatBufferSizeMb();
-                var ndiBw = _ndiOut is { IsActive: true } && _ndiOut.SendBytesPerSecond > 0
-                    ? NdiFrameSpec.FormatBandwidthGb(_ndiOut.SendBytesPerSecond)
-                    : "—";
-                var status =
-                    $"FPS {_renderFps:0.0} | NDI {ndiRes} {ndiBw} | {bufMb} | viewers={conns} | Layers={Layers.Count}";
-
-                if (!_renderExit && !_disposed && !CarouselBusy)
-                    Application.Current?.Dispatcher.BeginInvoke(() =>
-                    {
-                        if (!_renderExit && !_disposed && !CarouselBusy)
-                            StatusText = status;
-                    });
+                // Status string is assembled on the UI thread (UiTick) to avoid NDI/WPF work here.
+                if (!CarouselBusy)
+                    _pendingStatus = "fps";
             }
         }
         catch (Exception ex)
         {
             if (!_renderExit && !_disposed)
-                Application.Current?.Dispatcher.BeginInvoke(() => StatusText = $"Frame error: {ex.Message}");
+                _pendingStatus = $"Frame error: {ex.Message}";
         }
     }
 
@@ -877,7 +1332,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         CompositionLayer? hit = null;
         foreach (var layer in Layers.OrderByDescending(l => l.ZIndex))
         {
-            if (!layer.Visible) continue;
+            if (!layer.IsEffectivelyVisible) continue;
             var (bx, by, bw, bh) = layer.GetMapBounds();
             if (bw <= 0 || bh <= 0) continue;
             if (canvasPixel.X >= bx && canvasPixel.X <= bx + bw &&
@@ -951,4 +1406,16 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _spoutCatalog?.Dispose();
         _gpu?.Dispose();
     }
+}
+
+public sealed class GroupChoice
+{
+    public GroupChoice(Guid? id, string name)
+    {
+        Id = id;
+        Name = name;
+    }
+
+    public Guid? Id { get; }
+    public string Name { get; }
 }
