@@ -1,0 +1,104 @@
+{
+  "name": "MAM Full Frame",
+  "canvasWidth": 8038,
+  "canvasHeight": 5798,
+  "backgroundImage": "pixelmap.png",
+  "zones": [
+    {
+      "id": "wall_west_1",
+      "name": "Wall West 1",
+      "x": 1100,
+      "y": 0,
+      "width": 3226,
+      "height": 1200,
+      "contentWidth": 3226,
+      "contentHeight": 1200,
+      "rotationDegrees": 0,
+      "singleImage": "singles/MAM-PIXELMAP-WEST-1.png"
+    },
+    {
+      "id": "wall_west_2",
+      "name": "Wall West 2",
+      "x": 4326,
+      "y": 0,
+      "width": 1866,
+      "height": 1200,
+      "contentWidth": 1866,
+      "contentHeight": 1200,
+      "rotationDegrees": 0,
+      "singleImage": "singles/MAM-PIXELMAP-WEST-2.png"
+    },
+    {
+      "id": "wall_west_3",
+      "name": "Wall West 3",
+      "x": 6192,
+      "y": 0,
+      "width": 880,
+      "height": 1200,
+      "contentWidth": 880,
+      "contentHeight": 1200,
+      "rotationDegrees": 0,
+      "singleImage": "singles/MAM-PIXELMAP-WEST-3.png"
+    },
+    {
+      "id": "wall_stage",
+      "name": "Wall Stage",
+      "x": 6838,
+      "y": 1386,
+      "width": 1200,
+      "height": 1920,
+      "contentWidth": 1920,
+      "contentHeight": 1200,
+      "rotationDegrees": 90,
+      "singleImage": "singles/MAM-PIXELMAP-STAGE.png"
+    },
+    {
+      "id": "wall_sud",
+      "name": "Wall Sud",
+      "x": 0,
+      "y": 1200,
+      "width": 1100,
+      "height": 3398,
+      "contentWidth": 3398,
+      "contentHeight": 1100,
+      "rotationDegrees": 90,
+      "singleImage": "singles/MAM-PIXELMAP-SUD.png"
+    },
+    {
+      "id": "floor",
+      "name": "Floor",
+      "x": 1100,
+      "y": 1200,
+      "width": 5738,
+      "height": 3398,
+      "contentWidth": 5738,
+      "contentHeight": 3398,
+      "rotationDegrees": 0,
+      "singleImage": "singles/MAM-PIXELMAP-FLOOR.png"
+    },
+    {
+      "id": "wall_nord",
+      "name": "Wall Nord",
+      "x": 6838,
+      "y": 3306,
+      "width": 1200,
+      "height": 2490,
+      "contentWidth": 2490,
+      "contentHeight": 1200,
+      "rotationDegrees": 90,
+      "singleImage": "singles/MAM-PIXELMAP-NORD.png"
+    },
+    {
+      "id": "wall_est",
+      "name": "Wall Est",
+      "x": 1100,
+      "y": 4598,
+      "width": 5738,
+      "height": 1200,
+      "contentWidth": 5738,
+      "contentHeight": 1200,
+      "rotationDegrees": 180,
+      "singleImage": "singles/MAM-PIXELMAP-EST.png"
+    }
+  ]
+}

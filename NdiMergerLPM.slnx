@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/NdiMerger.App/NdiMerger.App.csproj" />
+    <Project Path="src/NdiMerger.Core/NdiMerger.Core.csproj" />
+    <Project Path="src/NdiMerger.Output/NdiMerger.Output.csproj" />
+    <Project Path="src/NdiMerger.Sources/NdiMerger.Sources.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,282 @@
+<Window x:Class="NdiMerger.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:NdiMerger.App.ViewModels"
+        Title="NdiMerger LPM — MAM Pixelmap"
+        Height="900" Width="1400"
+        Background="#1E1E1E"
+        Foreground="White"
+        TextElement.Foreground="White">
+  <Window.Resources>
+    <Style TargetType="TextBlock">
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style TargetType="Label">
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style TargetType="CheckBox">
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style TargetType="Button">
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="Background" Value="#333" />
+      <Setter Property="BorderBrush" Value="#555" />
+      <Setter Property="Padding" Value="8,4" />
+    </Style>
+    <Style TargetType="TextBox">
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="Background" Value="#2A2A2A" />
+      <Setter Property="BorderBrush" Value="#555" />
+      <Setter Property="CaretBrush" Value="White" />
+    </Style>
+    <Style TargetType="ComboBox">
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="Background" Value="#2A2A2A" />
+      <Setter Property="BorderBrush" Value="#555" />
+    </Style>
+    <Style TargetType="ComboBoxItem">
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="Background" Value="#2A2A2A" />
+    </Style>
+    <Style TargetType="ListBox">
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="Background" Value="#2A2A2A" />
+      <Setter Property="BorderBrush" Value="#444" />
+    </Style>
+    <Style TargetType="ListBoxItem">
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style TargetType="StatusBar">
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="Background" Value="#111" />
+    </Style>
+    <Style TargetType="StatusBarItem">
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+  </Window.Resources>
+
+  <Window.DataContext>
+    <vm:MainViewModel />
+  </Window.DataContext>
+
+  <DockPanel>
+    <StatusBar DockPanel.Dock="Bottom">
+      <StatusBarItem>
+        <TextBlock Text="{Binding StatusText}" Foreground="White" />
+      </StatusBarItem>
+      <StatusBarItem HorizontalAlignment="Right">
+        <TextBlock Text="{Binding CanvasInfo}" Margin="12,0" Foreground="White" />
+      </StatusBarItem>
+    </StatusBar>
+
+    <Grid Margin="8">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="280" />
+        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="300" />
+      </Grid.ColumnDefinitions>
+
+      <DockPanel Grid.Column="0" Margin="0,0,8,0">
+        <TextBlock DockPanel.Dock="Top" Text="SOURCES" FontWeight="Bold" Margin="0,0,0,6" Foreground="White" />
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,6">
+          <Button Content="Refresh" Command="{Binding RefreshSourcesCommand}" Margin="0,0,6,0" />
+          <Button Content="Add" Command="{Binding AddSelectedSourceCommand}" />
+        </StackPanel>
+        <ListBox ItemsSource="{Binding AvailableSources}"
+                 SelectedItem="{Binding SelectedSource}"
+                 DisplayMemberPath="DisplayName" />
+      </DockPanel>
+
+      <!-- Full map fitted into viewport, no scrollbars -->
+      <Border Grid.Column="1" Background="#111" BorderBrush="#444" BorderThickness="1"
+              Name="PreviewBorder" SizeChanged="PreviewBorder_SizeChanged">
+        <Grid Name="PreviewHost" Background="Transparent"
+              HorizontalAlignment="Center" VerticalAlignment="Center"
+              MouseLeftButtonDown="Preview_MouseLeftButtonDown"
+              MouseMove="Preview_MouseMove"
+              MouseLeftButtonUp="Preview_MouseLeftButtonUp"
+              MouseLeave="Preview_MouseLeftButtonUp">
+          <Image Source="{Binding PreviewImage}"
+                 Stretch="Uniform"
+                 RenderOptions.BitmapScalingMode="HighQuality"
+                 Name="PreviewImageControl" />
+          <Canvas Name="OverlayCanvas" IsHitTestVisible="False" />
+          <TextBlock Text="{Binding Fps, StringFormat={}{0:0.0} FPS}"
+                     HorizontalAlignment="Left"
+                     VerticalAlignment="Top"
+                     Margin="8"
+                     Padding="6,3"
+                     FontSize="14"
+                     FontWeight="SemiBold"
+                     Foreground="White"
+                     Background="#AA000000"
+                     IsHitTestVisible="False" />
+        </Grid>
+      </Border>
+
+      <DockPanel Grid.Column="2" Margin="8,0,0,0">
+        <TextBlock DockPanel.Dock="Top" Text="LAYERS / OUTPUT" FontWeight="Bold" Margin="0,0,0,6" Foreground="White" />
+
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,6">
+          <Button Content="Up" Command="{Binding LayerUpCommand}" Width="40" Margin="0,0,4,0" />
+          <Button Content="Down" Command="{Binding LayerDownCommand}" Width="48" Margin="0,0,4,0" />
+          <Button Content="Remove" Command="{Binding RemoveSelectedLayerCommand}" />
+        </StackPanel>
+
+        <ListBox DockPanel.Dock="Top" Height="160"
+                 ItemsSource="{Binding Layers}"
+                 SelectedItem="{Binding SelectedLayer}"
+                 DisplayMemberPath="Name" Margin="0,0,0,8" />
+
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel>
+            <TextBlock Text="Zone snap" FontWeight="SemiBold" Margin="0,0,0,4" Foreground="White" />
+            <ComboBox ItemsSource="{Binding Zones}"
+                      SelectedItem="{Binding SelectedZone}"
+                      DisplayMemberPath="Name"
+                      Margin="0,0,0,4" />
+            <ComboBox ItemsSource="{Binding ScaleModes}"
+                      SelectedItem="{Binding SelectedScaleMode}"
+                      Margin="0,0,0,4" />
+            <Button Content="Snap selected to zone" Command="{Binding SnapToZoneCommand}" Margin="0,0,0,12" />
+
+            <TextBlock Text="Wand-Karussell" FontWeight="SemiBold" Margin="0,0,0,4" Foreground="White" />
+            <ComboBox ItemsSource="{Binding CarouselDirections}"
+                      SelectedValue="{Binding CarouselDirection}"
+                      SelectedValuePath="Value"
+                      DisplayMemberPath="Label"
+                      Margin="0,0,0,4" />
+            <Grid Margin="0,0,0,4">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <Slider Grid.Column="0"
+                      Minimum="0.3" Maximum="5.0"
+                      TickFrequency="0.1"
+                      IsSnapToTickEnabled="True"
+                      Value="{Binding CarouselDurationSeconds}"
+                      VerticalAlignment="Center" />
+              <TextBlock Grid.Column="1"
+                         Text="{Binding CarouselDurationSeconds, StringFormat={}{0:0.0} s}"
+                         VerticalAlignment="Center"
+                         Margin="8,0,0,0"
+                         MinWidth="40"
+                         Foreground="White" />
+            </Grid>
+            <Button Content="Volle Runde (3× sync)"
+                    Command="{Binding PushWallsCommand}"
+                    Margin="0,0,0,12" />
+
+            <TextBlock Text="Boden-Spiegelung" FontWeight="SemiBold" Margin="0,0,0,4" Foreground="White" />
+            <CheckBox Content="Wand auf Floor spiegeln"
+                      IsChecked="{Binding FloorReflectionEnabled}"
+                      Margin="0,0,0,6" />
+            <Grid Margin="0,0,0,12">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="86" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="44" />
+              </Grid.ColumnDefinitions>
+              <Grid.RowDefinitions>
+                <RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition />
+              </Grid.RowDefinitions>
+
+              <TextBlock Grid.Row="0" Text="Deckkraft" VerticalAlignment="Center" Foreground="White" />
+              <Slider Grid.Row="0" Grid.Column="1"
+                      Minimum="0" Maximum="1" TickFrequency="0.01"
+                      Value="{Binding FloorReflectionOpacity}"
+                      VerticalAlignment="Center" Margin="4,2" />
+              <TextBlock Grid.Row="0" Grid.Column="2"
+                         Text="{Binding FloorReflectionOpacity, StringFormat={}{0:0.00}}"
+                         VerticalAlignment="Center" Foreground="White" />
+
+              <TextBlock Grid.Row="1" Text="Blur" VerticalAlignment="Center" Foreground="White" />
+              <Slider Grid.Row="1" Grid.Column="1"
+                      Minimum="0" Maximum="24" TickFrequency="0.5"
+                      Value="{Binding FloorReflectionBlur}"
+                      VerticalAlignment="Center" Margin="4,2" />
+              <TextBlock Grid.Row="1" Grid.Column="2"
+                         Text="{Binding FloorReflectionBlur, StringFormat={}{0:0.0}}"
+                         VerticalAlignment="Center" Foreground="White" />
+
+              <TextBlock Grid.Row="2" Text="Länge" VerticalAlignment="Center" Foreground="White" />
+              <Slider Grid.Row="2" Grid.Column="1"
+                      Minimum="0.05" Maximum="1" TickFrequency="0.01"
+                      Value="{Binding FloorReflectionLength}"
+                      VerticalAlignment="Center" Margin="4,2" />
+              <TextBlock Grid.Row="2" Grid.Column="2"
+                         Text="{Binding FloorReflectionLength, StringFormat={}{0:0.00}}"
+                         VerticalAlignment="Center" Foreground="White" />
+
+              <TextBlock Grid.Row="3" Text="Winkel" VerticalAlignment="Center" Foreground="White" />
+              <Slider Grid.Row="3" Grid.Column="1"
+                      Minimum="0" Maximum="1" TickFrequency="0.01"
+                      Value="{Binding FloorReflectionAngle}"
+                      VerticalAlignment="Center" Margin="4,2" />
+              <TextBlock Grid.Row="3" Grid.Column="2"
+                         Text="{Binding FloorReflectionAngle, StringFormat={}{0:0.00}}"
+                         VerticalAlignment="Center" Foreground="White" />
+
+              <TextBlock Grid.Row="4" Text="Kante unten" VerticalAlignment="Center" Foreground="White" />
+              <Slider Grid.Row="4" Grid.Column="1"
+                      Minimum="0" Maximum="1" TickFrequency="0.01"
+                      Value="{Binding FloorReflectionFadeStart}"
+                      VerticalAlignment="Center" Margin="4,2" />
+              <TextBlock Grid.Row="4" Grid.Column="2"
+                         Text="{Binding FloorReflectionFadeStart, StringFormat={}{0:0.00}}"
+                         VerticalAlignment="Center" Foreground="White" />
+            </Grid>
+
+            <TextBlock Text="Layer properties" FontWeight="SemiBold" Margin="0,0,0,4" Foreground="White" />
+            <Grid Margin="0,0,0,8">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="70" />
+                <ColumnDefinition Width="*" />
+              </Grid.ColumnDefinitions>
+              <Grid.RowDefinitions>
+                <RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition />
+                <RowDefinition /><RowDefinition /><RowDefinition />
+              </Grid.RowDefinitions>
+
+              <TextBlock Grid.Row="0" Text="X" VerticalAlignment="Center" Foreground="White" />
+              <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding SelectedLayer.X, UpdateSourceTrigger=LostFocus}" Margin="0,2" />
+              <TextBlock Grid.Row="1" Text="Y" VerticalAlignment="Center" Foreground="White" />
+              <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding SelectedLayer.Y, UpdateSourceTrigger=LostFocus}" Margin="0,2" />
+              <TextBlock Grid.Row="2" Text="Scale" VerticalAlignment="Center" Foreground="White" />
+              <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding SelectedLayer.Scale, UpdateSourceTrigger=LostFocus}" Margin="0,2" />
+              <TextBlock Grid.Row="3" Text="Rotation" VerticalAlignment="Center" Foreground="White" />
+              <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding SelectedLayer.RotationDegrees, UpdateSourceTrigger=LostFocus}" Margin="0,2" />
+              <TextBlock Grid.Row="4" Text="Opacity" VerticalAlignment="Center" Foreground="White" />
+              <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding SelectedLayer.Opacity, UpdateSourceTrigger=LostFocus}" Margin="0,2" />
+              <TextBlock Grid.Row="5" Text="Native W" VerticalAlignment="Center" Foreground="White" />
+              <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding SelectedLayer.NativeWidth}" Margin="0,2" Foreground="White" />
+              <TextBlock Grid.Row="6" Text="Native H" VerticalAlignment="Center" Foreground="White" />
+              <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding SelectedLayer.NativeHeight}" Margin="0,2" Foreground="White" />
+            </Grid>
+
+            <CheckBox Content="Visible" IsChecked="{Binding SelectedLayer.Visible}" Margin="0,0,0,12" />
+
+            <Separator Margin="0,0,0,8" />
+            <TextBlock Text="NDI Output" FontWeight="SemiBold" Margin="0,0,0,4" Foreground="White" />
+            <TextBox Text="{Binding OutputName, UpdateSourceTrigger=LostFocus}" Margin="0,0,0,4" />
+            <CheckBox Content="Send NDI (8038×5798)" IsChecked="{Binding NdiSending}" Margin="0,0,0,12" />
+
+            <TextBlock Text="Pixelmap-Overlay" FontWeight="SemiBold" Margin="0,0,0,4" Foreground="White" />
+            <CheckBox Content="An (halbtransparent über allem)"
+                      IsChecked="{Binding ShowBackgroundInPreview}"
+                      Margin="0,0,0,4" />
+            <CheckBox Content="auch im NDI-Ausgang"
+                      IsChecked="{Binding ShowBackgroundInOutput}"
+                      Margin="0,0,0,12" />
+
+            <StackPanel Orientation="Horizontal">
+              <Button Content="Save layout" Command="{Binding SaveLayoutCommand}" Margin="0,0,6,0" />
+              <Button Content="Load layout" Command="{Binding LoadLayoutCommand}" />
+            </StackPanel>
+          </StackPanel>
+        </ScrollViewer>
+      </DockPanel>
+    </Grid>
+  </DockPanel>
+</Window>
