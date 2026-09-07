@@ -1,0 +1,43 @@
+{
+  "ndi": {
+    "machinename": "",
+    "tcp": {
+      "recv": {
+        "enable": true
+      }
+    },
+    "rudp": {
+      "recv": {
+        "enable": true
+      }
+    },
+    "groups": {
+      "send": "",
+      "recv": ""
+    },
+    "unicast": {
+      "recv": {
+        "enable": true
+      }
+    },
+    "networks": {
+      "ips": "",
+      "discovery": ""
+    },
+    "adapters": {
+      "allowed": []
+    },
+    "multicast": {
+      "send": {
+        "ttl": 1,
+        "enable": false,
+        "netmask": "255.255.0.0",
+        "netprefix": "239.255.0.0"
+      },
+      "recv": {
+        "enable": true,
+        "subnets": []
+      }
+    }
+  }
+}

@@ -6,6 +6,8 @@ namespace NdiMerger.Core.Models;
 
 public sealed class CompositionLayer : INotifyPropertyChanged
 {
+    public const float DrawOpacityEpsilon = 0.01f;
+
     public Guid Id { get; } = Guid.NewGuid();
 
     private string _name = "Layer";
@@ -31,7 +33,20 @@ public sealed class CompositionLayer : INotifyPropertyChanged
     public float RotationDegrees { get => _rotationDegrees; set => SetField(ref _rotationDegrees, value); }
 
     private float _opacity = 1f;
-    public float Opacity { get => _opacity; set => SetField(ref _opacity, value); }
+    /// <summary>Target opacity (0–1). Persisted; animated via <see cref="DrawOpacity"/>.</summary>
+    public float Opacity
+    {
+        get => _opacity;
+        set => SetField(ref _opacity, Math.Clamp(value, 0f, 1f));
+    }
+
+    /// <summary>Runtime animated opacity toward <see cref="TargetDrawOpacity"/>. Not persisted.</summary>
+    public float DrawOpacity { get; set; } = 1f;
+
+    private FadeAnimator _fade;
+
+    /// <summary>Synced from parent <see cref="LayerGroup.DrawOpacity"/> each fade tick.</summary>
+    public float ParentGroupDrawOpacity { get; set; } = 1f;
 
     public ScaleMode ScaleMode { get; set; } = ScaleMode.Native;
     public string? ZoneId { get; set; }
@@ -41,7 +56,7 @@ public sealed class CompositionLayer : INotifyPropertyChanged
 
     /// <summary>
     /// Synced from parent <see cref="LayerGroup.Visible"/>. When the group is hidden,
-    /// members stay individually Visible but are not drawn.
+    /// members stay individually Visible but are not selectable.
     /// </summary>
     private bool _parentGroupVisible = true;
     public bool ParentGroupVisible
@@ -53,16 +68,70 @@ public sealed class CompositionLayer : INotifyPropertyChanged
     private bool _visible = true;
     public bool Visible { get => _visible; set => SetField(ref _visible, value); }
 
-    /// <summary>Drawn / hit-tested only when both the layer and its group are visible.</summary>
-    public bool IsEffectivelyVisible => Visible && ParentGroupVisible;
+    /// <summary>Logical visibility for hit-test / selection (no fade).</summary>
+    public bool IsLogicallyVisible => Visible && ParentGroupVisible;
+
+    /// <summary>Target draw opacity for fade animation (Visible off → 0).</summary>
+    public float TargetDrawOpacity => Visible ? Opacity : 0f;
+
+    /// <summary>Opacity used when compositing (layer × group fade).</summary>
+    public float EffectiveDrawOpacity => DrawOpacity * ParentGroupDrawOpacity;
+
+    /// <summary>Drawn while fading out until opacity reaches ~0.</summary>
+    public bool IsEffectivelyVisible => EffectiveDrawOpacity > DrawOpacityEpsilon;
 
     public int ZIndex { get; set; }
 
     private int _nativeWidth;
-    public int NativeWidth { get => _nativeWidth; set => SetField(ref _nativeWidth, value); }
+    public int NativeWidth
+    {
+        get => _nativeWidth;
+        set
+        {
+            if (!SetField(ref _nativeWidth, value)) return;
+            NotifyCropSliderLimits();
+        }
+    }
 
     private int _nativeHeight;
-    public int NativeHeight { get => _nativeHeight; set => SetField(ref _nativeHeight, value); }
+    public int NativeHeight
+    {
+        get => _nativeHeight;
+        set
+        {
+            if (!SetField(ref _nativeHeight, value)) return;
+            NotifyCropSliderLimits();
+        }
+    }
+
+    public int CropXMax => Math.Max(0, NativeWidth - 1);
+    public int CropYMax => Math.Max(0, NativeHeight - 1);
+    public int CropWMax => Math.Max(1, NativeWidth);
+    public int CropHMax => Math.Max(1, NativeHeight);
+
+    private int _cropX;
+    /// <summary>Left of this layer's crop in native pixels. Persisted per layer.</summary>
+    public int CropX { get => _cropX; set => SetField(ref _cropX, Math.Max(0, value)); }
+
+    private int _cropY;
+    /// <summary>Top of this layer's crop in native pixels. Persisted per layer.</summary>
+    public int CropY { get => _cropY; set => SetField(ref _cropY, Math.Max(0, value)); }
+
+    private int _cropW;
+    /// <summary>Crop width in native pixels. 0 = full width. Sliders see the clamped size so they cannot snap to 1 px.</summary>
+    public int CropW
+    {
+        get => GetClampedCrop().W;
+        set => SetField(ref _cropW, Math.Max(0, value));
+    }
+
+    private int _cropH;
+    /// <summary>Crop height in native pixels. 0 = full height. Sliders see the clamped size so they cannot snap to 1 px.</summary>
+    public int CropH
+    {
+        get => GetClampedCrop().H;
+        set => SetField(ref _cropH, Math.Max(0, value));
+    }
 
     private bool _blackKeyEnabled;
     public bool BlackKeyEnabled { get => _blackKeyEnabled; set => SetField(ref _blackKeyEnabled, value); }
@@ -84,18 +153,141 @@ public sealed class CompositionLayer : INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    private void SetField<T>(ref T field, T value, [CallerMemberName] string? name = null)
+    /// <summary>Set opacity and draw opacity immediately (no fade). Used by wall carousel.</summary>
+    public void SetOpacityImmediate(float opacity)
     {
-        if (Equals(field, value)) return;
+        opacity = Math.Clamp(opacity, 0f, 1f);
+        Opacity = opacity;
+        float draw = Visible ? opacity : 0f;
+        DrawOpacity = draw;
+        _fade.Snap(draw);
+    }
+
+    /// <summary>Snap DrawOpacity to the current target (load / instant fade).</summary>
+    public void SnapDrawOpacity()
+    {
+        DrawOpacity = TargetDrawOpacity;
+        _fade.Snap(DrawOpacity);
+    }
+
+    /// <summary>Advance DrawOpacity toward target over <paramref name="durationSeconds"/>. Returns true if still animating.</summary>
+    public bool TickFade(float dt, float durationSeconds)
+    {
+        float target = TargetDrawOpacity;
+        if (!_fade.IsRunning && DrawOpacity == target)
+            return false;
+        DrawOpacity = _fade.Tick(DrawOpacity, target, dt, durationSeconds, out bool animating);
+        return animating;
+    }
+
+    private bool SetField<T>(ref T field, T value, [CallerMemberName] string? name = null)
+    {
+        if (Equals(field, value)) return false;
         field = value;
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+        return true;
+    }
+
+    private void NotifyCropSliderLimits()
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropXMax)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropYMax)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropWMax)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropHMax)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropW)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropH)));
     }
 
     public Vector2 GetDrawSize()
     {
-        if (NativeWidth <= 0 || NativeHeight <= 0)
+        var (srcW, srcH) = GetSourcePixelSize();
+        if (srcW <= 0 || srcH <= 0)
             return Vector2.Zero;
-        return new Vector2(NativeWidth * Scale, NativeHeight * Scale);
+        return new Vector2(srcW * Scale, srcH * Scale);
+    }
+
+    /// <summary>Clamped crop rectangle in native pixels. 0×0 crop means the full frame.</summary>
+    public (int X, int Y, int W, int H) GetClampedCrop()
+    {
+        int nw = Math.Max(NativeWidth, 0);
+        int nh = Math.Max(NativeHeight, 0);
+        if (nw <= 0 || nh <= 0)
+            return (0, 0, 0, 0);
+
+        int w = _cropW <= 0 ? nw : _cropW;
+        int h = _cropH <= 0 ? nh : _cropH;
+        int x = Math.Clamp(_cropX, 0, nw - 1);
+        int y = Math.Clamp(_cropY, 0, nh - 1);
+        w = Math.Clamp(w, 1, nw - x);
+        h = Math.Clamp(h, 1, nh - y);
+        return (x, y, w, h);
+    }
+
+    /// <summary>Pixel size of this layer's cropped region (placement and draw size).</summary>
+    public (int Width, int Height) GetSourcePixelSize()
+    {
+        var (_, _, w, h) = GetClampedCrop();
+        return (w, h);
+    }
+
+    /// <summary>Normalized UV rectangle for this layer's crop (0–1).</summary>
+    public (float U0, float V0, float U1, float V1) GetCropUvRect()
+    {
+        if (NativeWidth <= 0 || NativeHeight <= 0)
+            return (0f, 0f, 1f, 1f);
+
+        var (x, y, w, h) = GetClampedCrop();
+        float invW = 1f / NativeWidth;
+        float invH = 1f / NativeHeight;
+        return (x * invW, y * invH, (x + w) * invW, (y + h) * invH);
+    }
+
+    public Vector2 MapCropUv(float u, float v)
+    {
+        var (u0, v0, u1, v1) = GetCropUvRect();
+        return new Vector2(u0 + u * (u1 - u0), v0 + v * (v1 - v0));
+    }
+
+    public bool HasCrop
+    {
+        get
+        {
+            if (NativeWidth <= 0 || NativeHeight <= 0)
+                return false;
+            var (x, y, w, h) = GetClampedCrop();
+            return x != 0 || y != 0 || w != NativeWidth || h != NativeHeight;
+        }
+    }
+
+    public void ResetCrop()
+    {
+        CropX = 0;
+        CropY = 0;
+        CropW = Math.Max(NativeWidth, 0);
+        CropH = Math.Max(NativeHeight, 0);
+    }
+
+    /// <summary>
+    /// Keep a pixel crop valid after the frame size changes.
+    /// A full-frame crop follows the new size; a custom crop is clamped.
+    /// </summary>
+    public void SyncCropToNativeSize(int previousWidth, int previousHeight)
+    {
+        bool wasUnset = _cropW <= 0 || _cropH <= 0;
+        bool wasFull = previousWidth > 0 && previousHeight > 0
+                       && _cropX == 0 && _cropY == 0
+                       && (wasUnset || (_cropW == previousWidth && _cropH == previousHeight));
+        if (wasUnset || wasFull || NativeWidth <= 0 || NativeHeight <= 0)
+        {
+            ResetCrop();
+            return;
+        }
+
+        var (x, y, w, h) = GetClampedCrop();
+        CropX = x;
+        CropY = y;
+        CropW = w;
+        CropH = h;
     }
 
     /// <summary>
@@ -136,16 +328,14 @@ public sealed class CompositionLayer : INotifyPropertyChanged
         float zcx = zone.X + zone.Width * 0.5f;
         float zcy = zone.Y + zone.Height * 0.5f;
 
-        if (NativeWidth <= 0 || NativeHeight <= 0)
+        var (srcW, srcH) = GetSourcePixelSize();
+        if (srcW <= 0 || srcH <= 0)
         {
             Scale = 1f;
             X = zcx - targetW * 0.5f;
             Y = zcy - targetH * 0.5f;
             return;
         }
-
-        float srcW = NativeWidth;
-        float srcH = NativeHeight;
 
         Scale = mode switch
         {

@@ -1,11 +1,13 @@
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using NdiMerger.Sources;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using NdiMerger.App.ViewModels;
+using NdiMerger.Core.Models;
 
 namespace NdiMerger.App;
 
@@ -89,6 +91,12 @@ public partial class MainWindow : Window
         return System.IO.Path.Combine(AppContext.BaseDirectory, "assets");
     }
 
+    private void NdiAdapterCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (NdiAdapterCombo.SelectedItem is NdiAdapterChoice choice)
+            Vm.CommitNdiAdapterFromUi(choice);
+    }
+
     private void PreviewBorder_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         FitPreviewToBorder();
@@ -164,40 +172,83 @@ public partial class MainWindow : Window
             OverlayCanvas.Children.Add(label);
         }
 
+        // LiDAR sensor marker for calibration
+        if (Vm.LidarSensorX > 0 || Vm.LidarSensorY > 0)
+        {
+            var sensor = new Ellipse
+            {
+                Width = 12,
+                Height = 12,
+                Stroke = Brushes.Red,
+                StrokeThickness = 2,
+                Fill = new SolidColorBrush(Color.FromArgb(120, 255, 60, 60))
+            };
+            Canvas.SetLeft(sensor, Vm.LidarSensorX * sx - 6);
+            Canvas.SetTop(sensor, Vm.LidarSensorY * sy - 6);
+            OverlayCanvas.Children.Add(sensor);
+        }
+
+        if (Vm.PlacingLidarSensor)
+        {
+            var hint = new TextBlock
+            {
+                Text = "Klick = Sensorposition setzen",
+                Foreground = Brushes.Yellow,
+                Background = new SolidColorBrush(Color.FromArgb(180, 0, 0, 0)),
+                FontSize = 12,
+                Padding = new Thickness(6, 3, 6, 3)
+            };
+            Canvas.SetLeft(hint, 8);
+            Canvas.SetTop(hint, 28);
+            OverlayCanvas.Children.Add(hint);
+        }
+
         // Layer content bounds on the map (after rotation)
         if (Vm.ShowLayerOverlays)
         {
             foreach (var layer in Vm.Layers)
             {
                 if (!layer.IsEffectivelyVisible) continue;
-                var (bx, by, bw, bh) = layer.GetMapBounds();
-                if (bw <= 0 || bh <= 0) continue;
-
+                var ribbonRects = WallCarousel.GetRibbonOverlayRects(layer, Vm.Zones);
+                var rects = ribbonRects.Count > 0
+                    ? ribbonRects
+                    : new[] { layer.GetMapBounds() };
                 bool selected = ReferenceEquals(layer, Vm.SelectedLayer);
-                var layerRect = new Rectangle
+                bool labeled = false;
+                foreach (var (bx, by, bw, bh) in rects)
                 {
-                    Width = bw * sx,
-                    Height = bh * sy,
-                    Stroke = selected ? Brushes.Yellow : Brushes.Lime,
-                    StrokeThickness = selected ? 2.5 : 1.5,
-                    StrokeDashArray = selected ? null : new DoubleCollection { 4, 2 },
-                    Fill = new SolidColorBrush(Color.FromArgb(selected ? (byte)55 : (byte)35, 50, 255, 80))
-                };
-                Canvas.SetLeft(layerRect, bx * sx);
-                Canvas.SetTop(layerRect, by * sy);
-                OverlayCanvas.Children.Add(layerRect);
+                    if (bw <= 0 || bh <= 0) continue;
 
-                var layerLabel = new TextBlock
-                {
-                    Text = $"{layer.Name} ({layer.NativeWidth}×{layer.NativeHeight})",
-                    Foreground = Brushes.White,
-                    Background = new SolidColorBrush(Color.FromArgb(160, 0, 0, 0)),
-                    FontSize = 11,
-                    Padding = new Thickness(3, 1, 3, 1)
-                };
-                Canvas.SetLeft(layerLabel, bx * sx + 4);
-                Canvas.SetTop(layerLabel, by * sy + 4);
-                OverlayCanvas.Children.Add(layerLabel);
+                    var layerRect = new Rectangle
+                    {
+                        Width = bw * sx,
+                        Height = bh * sy,
+                        Stroke = selected ? Brushes.Yellow : Brushes.Lime,
+                        StrokeThickness = selected ? 2.5 : 1.5,
+                        StrokeDashArray = selected ? null : new DoubleCollection { 4, 2 },
+                        Fill = new SolidColorBrush(Color.FromArgb(selected ? (byte)55 : (byte)35, 50, 255, 80))
+                    };
+                    Canvas.SetLeft(layerRect, bx * sx);
+                    Canvas.SetTop(layerRect, by * sy);
+                    OverlayCanvas.Children.Add(layerRect);
+
+                    if (labeled)
+                        continue;
+                    labeled = true;
+                    var layerLabel = new TextBlock
+                    {
+                        Text = layer.HasCrop
+                            ? $"{layer.Name} ({layer.GetSourcePixelSize().Width}×{layer.GetSourcePixelSize().Height} crop)"
+                            : $"{layer.Name} ({layer.NativeWidth}×{layer.NativeHeight})",
+                        Foreground = Brushes.White,
+                        Background = new SolidColorBrush(Color.FromArgb(160, 0, 0, 0)),
+                        FontSize = 11,
+                        Padding = new Thickness(3, 1, 3, 1)
+                    };
+                    Canvas.SetLeft(layerLabel, bx * sx + 4);
+                    Canvas.SetTop(layerLabel, by * sy + 4);
+                    OverlayCanvas.Children.Add(layerLabel);
+                }
             }
         }
     }

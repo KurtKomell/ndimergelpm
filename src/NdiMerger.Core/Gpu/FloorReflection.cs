@@ -66,15 +66,7 @@ public static class FloorReflection
 {
     // Neighbour stubs only drive OffsetPolyMiter. Zero-travel stub segments
     // are skipped, so the strip itself stays axis-aligned / along West 2.
-    private static readonly Vector2[] WestPoly =
-    [
-        new(1100, 4598), // Süd stub → 45° at NW
-        new(1100, 1200), // West 1 / Süd
-        new(4326, 1200), // West 1 / West 2 (real kink)
-        new(6192, 2108), // West 2 / West 3 (real kink)
-        new(6838, 2108), // West 3 / floor east
-    ];
-
+    // West outline is BuildWestFloorPoly (West 2 length along the diagonal).
     private static readonly Vector2[] SudPoly =
     [
         new(4326, 1200), // West stub → 45° at NW
@@ -97,6 +89,69 @@ public static class FloorReflection
         new(6838, 4598), // Ost / Nord
         new(6838, 3306), // Nord / stage (straight)
     ];
+
+    public static void GetWestFloorKinks(
+        ZoneDefinition floor,
+        out Vector2 uvA,
+        out Vector2 uvB,
+        IReadOnlyList<ZoneDefinition>? zones = null)
+    {
+        var poly = BuildWestFloorPoly(floor, zones);
+        uvA = ToFloorUv(poly[2], floor);
+        uvB = ToFloorUv(poly[3], floor);
+    }
+
+    /// <summary>
+    /// Floor outline along West: West 1 horizontal, then West 2 as a diagonal
+    /// whose Euclidean length equals the West 2 panel, then West 3 horizontal
+    /// at its panel length up to the floor's east edge.
+    /// </summary>
+    public static Vector2[] BuildWestFloorPoly(ZoneDefinition floor, IReadOnlyList<ZoneDefinition>? zones = null)
+    {
+        float west2StartX = 4326f;
+        float west2Len = 1866f;
+        float west3Len = 880f;
+        if (zones is not null)
+        {
+            var w1 = FindZone(zones, "wall_west_1");
+            var w2 = FindZone(zones, "wall_west_2");
+            var w3 = FindZone(zones, "wall_west_3");
+            if (w2 is not null)
+            {
+                west2StartX = w2.X;
+                west2Len = w2.ContentWidth > 0 ? w2.ContentWidth : w2.Width;
+            }
+            else if (w1 is not null)
+            {
+                west2StartX = w1.X + w1.Width;
+            }
+            if (w3 is not null)
+                west3Len = w3.ContentWidth > 0 ? w3.ContentWidth : w3.Width;
+        }
+
+        float floorRight = floor.X + floor.Width;
+        float floorTop = floor.Y;
+        west3Len = MathF.Min(west3Len, MathF.Max(8f, floorRight - west2StartX - 8f));
+        float dx = (floorRight - west3Len) - west2StartX;
+        dx = Math.Clamp(dx, 1f, west2Len);
+        float dy = MathF.Sqrt(MathF.Max(west2Len * west2Len - dx * dx, 0f));
+
+        return
+        [
+            new(floor.X, floor.Y + floor.Height),
+            new(floor.X, floorTop),
+            new(west2StartX, floorTop),
+            new(west2StartX + dx, floorTop + dy),
+            new(floorRight, floorTop + dy)
+        ];
+    }
+
+    private static ZoneDefinition? FindZone(IReadOnlyList<ZoneDefinition> zones, string id) =>
+        zones.FirstOrDefault(z => z.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+
+    private static Vector2 ToFloorUv(Vector2 canvas, ZoneDefinition floor) => new(
+        (canvas.X - floor.X) / MathF.Max(floor.Width, 1f),
+        (canvas.Y - floor.Y) / MathF.Max(floor.Height, 1f));
 
     public static FloorReflectEdge? ResolveEdge(
         CompositionLayer layer,
@@ -134,27 +189,28 @@ public static class FloorReflection
         ZoneDefinition floor,
         ZoneDefinition? nord,
         float length,
-        float angle)
+        float angle,
+        IReadOnlyList<ZoneDefinition>? zones = null)
     {
         var edge = ResolveEdge(layer, floor, nord);
         if (edge is null)
             return [];
         if (layer.NativeWidth <= 0 || layer.NativeHeight <= 0)
             return [];
-        if (layer.Opacity < 0.02f)
+        if (layer.EffectiveDrawOpacity < 0.02f)
             return [];
 
         length = Math.Clamp(length, 0.05f, 1f);
         angle = Math.Clamp(angle, 0f, 1f);
-        float opacity = Math.Clamp(layer.Opacity, 0f, 1f);
+        float opacity = Math.Clamp(layer.EffectiveDrawOpacity, 0f, 1f);
         var vanishing = new Vector2(floor.X + floor.Width * 0.5f, floor.Y + floor.Height * 0.5f);
         float lengthPx = MathF.Max(8f, floor.Height * length);
         float offsetDist = lengthPx * (1f - Math.Clamp(angle, 0f, 1f) * 0.55f);
 
         return edge.Value switch
         {
-            FloorReflectEdge.West => BuildAlongPoly(layer, WestPoly, edge.Value, alongY: false, flipU: false, flipV: false, offsetDist, vanishing, opacity),
-            FloorReflectEdge.Sud => BuildAlongPoly(layer, SudPoly, edge.Value, alongY: true, flipU: false, flipV: true, offsetDist, vanishing, opacity),
+            FloorReflectEdge.West => BuildAlongPoly(layer, BuildWestFloorPoly(floor, zones), edge.Value, alongY: false, flipU: false, flipV: false, offsetDist, vanishing, opacity),
+            FloorReflectEdge.Sud => BuildAlongPoly(layer, SudPoly, edge.Value, alongY: true, flipU: SudFlipU(layer), flipV: SudFlipV(layer), offsetDist, vanishing, opacity),
             FloorReflectEdge.Ost => BuildAlongPoly(layer, OstPoly, edge.Value, alongY: false, flipU: true, flipV: false, offsetDist, vanishing, opacity),
             FloorReflectEdge.Nord => BuildAlongPoly(layer, NordPoly, edge.Value, alongY: true, flipU: false, flipV: false, offsetDist, vanishing, opacity),
             _ => []
@@ -166,7 +222,8 @@ public static class FloorReflection
         ZoneDefinition floor,
         ZoneDefinition? nord,
         float length,
-        float angle) => Build(layer, floor, nord, length, angle);
+        float angle,
+        IReadOnlyList<ZoneDefinition>? zones = null) => Build(layer, floor, nord, length, angle, zones);
 
     public static Vector2 ToRt(Vector2 canvas, ZoneDefinition floor, int rtW, int rtH)
     {
@@ -178,6 +235,20 @@ public static class FloorReflection
     public static bool IsFloorLayer(CompositionLayer layer) =>
         layer.ZoneId is not null &&
         layer.ZoneId.Equals("floor", StringComparison.OrdinalIgnoreCase);
+
+    // 90° CCW puts texture v=0 on the floor seam and u along +Y.
+    // 270° (source default) puts v=1 on the seam and reverses u along the wall.
+    private static bool SudFlipU(CompositionLayer layer)
+    {
+        float rot = ((layer.RotationDegrees % 360f) + 360f) % 360f;
+        return MathF.Abs(rot - 270f) < 1f;
+    }
+
+    private static bool SudFlipV(CompositionLayer layer)
+    {
+        float rot = ((layer.RotationDegrees % 360f) + 360f) % 360f;
+        return MathF.Abs(rot - 90f) < 1f;
+    }
 
     private static List<FloorReflectQuad> BuildAlongPoly(
         CompositionLayer layer,
@@ -244,10 +315,10 @@ public static class FloorReflection
                 C1 = far1,
                 C2 = seam0,
                 C3 = seam1,
-                Uv0 = new Vector2(u0, vFar),
-                Uv1 = new Vector2(u1, vFar),
-                Uv2 = new Vector2(u0, vSeam),
-                Uv3 = new Vector2(u1, vSeam),
+                Uv0 = layer.MapCropUv(u0, vFar),
+                Uv1 = layer.MapCropUv(u1, vFar),
+                Uv2 = layer.MapCropUv(u0, vSeam),
+                Uv3 = layer.MapCropUv(u1, vSeam),
                 Edge = edge,
                 LengthPx = offsetDist,
                 MiterA = a,
@@ -351,10 +422,10 @@ public static class FloorReflection
             C1 = mirrored[1],
             C2 = mirrored[2],
             C3 = mirrored[3],
-            Uv0 = new Vector2(0, 0),
-            Uv1 = new Vector2(1, 0),
-            Uv2 = new Vector2(0, 1),
-            Uv3 = new Vector2(1, 1),
+            Uv0 = layer.MapCropUv(0, 0),
+            Uv1 = layer.MapCropUv(1, 0),
+            Uv2 = layer.MapCropUv(0, 1),
+            Uv3 = layer.MapCropUv(1, 1),
             Edge = edge,
             LengthPx = lengthPx,
             MiterA = miterA,
@@ -421,9 +492,12 @@ public static class FloorReflection
         switch (edge)
         {
             case FloorReflectEdge.West:
-                a = WestPoly[1];
-                b = WestPoly[^1];
+            {
+                var west = BuildWestFloorPoly(floor);
+                a = west[1];
+                b = west[^1];
                 break;
+            }
             case FloorReflectEdge.Ost:
                 a = new Vector2(l, bot);
                 b = new Vector2(r, bot);
@@ -481,8 +555,9 @@ public static class FloorReflection
 
     private static Vector2[] LayerCorners(CompositionLayer layer)
     {
-        float w = layer.NativeWidth * layer.Scale;
-        float h = layer.NativeHeight * layer.Scale;
+        var size = layer.GetDrawSize();
+        float w = size.X;
+        float h = size.Y;
         float x = layer.X;
         float y = layer.Y;
         float rot = layer.RotationDegrees;

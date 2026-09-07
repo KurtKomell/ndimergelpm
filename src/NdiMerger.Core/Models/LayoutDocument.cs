@@ -5,16 +5,20 @@ namespace NdiMerger.Core.Models;
 
 public sealed class LayoutDocument
 {
-    public string Version { get; set; } = "1.2";
+    public string Version { get; set; } = "1.5";
     public string OutputName { get; set; } = "MAM-Pixelmap";
     public bool ShowBackgroundInOutput { get; set; } = false;
     public bool ShowBackgroundInPreview { get; set; } = true;
     public bool ShowLayerOverlays { get; set; } = true;
     public bool NdiSending { get; set; } = true;
+    public List<string> EnabledNdiZoneIds { get; set; } = [];
+    public string? NdiAdapterId { get; set; }
+    public string? NdiAdapterIp { get; set; }
     public ScaleMode SelectedScaleMode { get; set; } = ScaleMode.Native;
     public string? SelectedZoneId { get; set; }
     public string? SelectedLayerKey { get; set; }
     public double CarouselDurationSeconds { get; set; } = 1.0;
+    public double FadeDurationSeconds { get; set; } = 2.0;
     public WallCarouselDirection CarouselDirection { get; set; } = WallCarouselDirection.WestToOst;
     public bool? FloorReflectionEnabled { get; set; }
     public float? FloorReflectionOpacity { get; set; }
@@ -22,6 +26,7 @@ public sealed class LayoutDocument
     public float? FloorReflectionLength { get; set; }
     public float? FloorReflectionAngle { get; set; }
     public float? FloorReflectionFadeStart { get; set; }
+    public LidarSettings? Lidar { get; set; }
     public List<LayoutGroupEntry> Groups { get; set; } = [];
     public List<LayoutLayerEntry> Layers { get; set; } = [];
 }
@@ -41,6 +46,7 @@ public sealed class LayoutGroupEntry
     public string Id { get; set; } = "";
     public string Name { get; set; } = "Group";
     public bool Visible { get; set; } = true;
+    public float? Opacity { get; set; }
     public bool IsExpanded { get; set; } = true;
     public int SortOrder { get; set; }
 }
@@ -64,6 +70,10 @@ public sealed class LayoutLayerEntry
     public int NativeHeight { get; set; }
     public bool BlackKeyEnabled { get; set; }
     public float BlackKeyThreshold { get; set; } = 0.08f;
+    public int CropX { get; set; }
+    public int CropY { get; set; }
+    public int CropW { get; set; }
+    public int CropH { get; set; }
 }
 
 public static class LayoutSerializer
@@ -92,26 +102,35 @@ public static class LayoutSerializer
         string? selectedZoneId = null,
         string? selectedLayerKey = null,
         double carouselDurationSeconds = 1.0,
+        double fadeDurationSeconds = 2.0,
         WallCarouselDirection carouselDirection = WallCarouselDirection.WestToOst,
         bool floorReflectionEnabled = true,
         float floorReflectionOpacity = 0.45f,
         float floorReflectionBlur = 8f,
         float floorReflectionLength = 0.4f,
         float floorReflectionAngle = 0.35f,
-        float floorReflectionFadeStart = 0f)
+        float floorReflectionFadeStart = 0f,
+        LidarSettings? lidar = null,
+        string? ndiAdapterId = null,
+        string? ndiAdapterIp = null,
+        IEnumerable<string>? enabledNdiZoneIds = null)
     {
         return new LayoutDocument
         {
-            Version = "1.2",
+            Version = "1.5",
             OutputName = outputName,
             ShowBackgroundInOutput = showBgOutput,
             ShowBackgroundInPreview = showBgPreview,
             ShowLayerOverlays = showLayerOverlays,
             NdiSending = ndiSending,
+            EnabledNdiZoneIds = enabledNdiZoneIds?.ToList() ?? [],
+            NdiAdapterId = ndiAdapterId,
+            NdiAdapterIp = ndiAdapterIp,
             SelectedScaleMode = selectedScaleMode,
             SelectedZoneId = selectedZoneId,
             SelectedLayerKey = selectedLayerKey,
             CarouselDurationSeconds = carouselDurationSeconds,
+            FadeDurationSeconds = fadeDurationSeconds,
             CarouselDirection = carouselDirection,
             FloorReflectionEnabled = floorReflectionEnabled,
             FloorReflectionOpacity = floorReflectionOpacity,
@@ -119,11 +138,13 @@ public static class LayoutSerializer
             FloorReflectionLength = floorReflectionLength,
             FloorReflectionAngle = floorReflectionAngle,
             FloorReflectionFadeStart = floorReflectionFadeStart,
+            Lidar = lidar,
             Groups = groups.OrderBy(g => g.SortOrder).Select(g => new LayoutGroupEntry
             {
                 Id = g.Id.ToString("N"),
                 Name = g.Name,
                 Visible = g.Visible,
+                Opacity = g.Opacity,
                 IsExpanded = g.IsExpanded,
                 SortOrder = g.SortOrder
             }).ToList(),
@@ -145,7 +166,11 @@ public static class LayoutSerializer
                 NativeWidth = l.NativeWidth,
                 NativeHeight = l.NativeHeight,
                 BlackKeyEnabled = l.BlackKeyEnabled,
-                BlackKeyThreshold = l.BlackKeyThreshold
+                BlackKeyThreshold = l.BlackKeyThreshold,
+                CropX = l.CropX,
+                CropY = l.CropY,
+                CropW = l.CropW,
+                CropH = l.CropH
             }).ToList()
         };
     }

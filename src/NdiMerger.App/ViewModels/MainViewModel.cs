@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows;
@@ -15,6 +16,7 @@ using NdiMerger.Core.Gpu;
 using NdiMerger.Core.Models;
 using NdiMerger.Output;
 using NdiMerger.Sources;
+using NdiMerger.Tracking;
 using Vortice.Direct3D11;
 
 namespace NdiMerger.App.ViewModels;
@@ -27,28 +29,34 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private Thread? _renderThread;
     private volatile bool _renderExit;
     private volatile bool _disposed;
-    private volatile bool _previewDirty;
     private double _renderFps;
-    private int _previewFrameCounter;
     private NdiSourceCatalog? _ndiCatalog;
     private SpoutSourceCatalog? _spoutCatalog;
     private GpuDevice? _gpu;
     private PixelMapCompositor? _compositor;
     private NdiOutputSender? _ndiOut;
     private PixelMapDefinition _pixelMap = new();
-    private byte[]? _previewBuffer;
-    private byte[]? _previewUiBuffer;
-    private byte[]? _previewPresentBuffer;
     private WriteableBitmap? _previewBitmap;
+    private int _lastPreviewGen = -1;
+    private int _previewPresentQueued;
+    private long _lastPreviewEmitQpc;
+    private long _lastFadeQpc;
+    private int _previewEmitCounter;
+    private double _previewFps;
     private DateTime _lastFpsTime = DateTime.UtcNow;
     private int _frameCounter;
     private volatile string? _pendingStatus;
+    private volatile string? _pendingLidarStatus;
+    private volatile bool _pendingLidarConnected;
+    private volatile float _pendingLidarRpm;
+    private volatile int _pendingLidarPointsPerRev;
     private CompositionLayer? _dragLayer;
     private Point _dragStartMouse;
     private float _dragStartX;
     private float _dragStartY;
     private bool _isDragging;
     private AppSession? _loadedSession;
+    private LidarTrackingService? _lidar;
 
     public AppSession? LoadedSession => _loadedSession;
 
@@ -58,6 +66,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public ObservableCollection<LayerTreeNode> LayerTree { get; } = [];
     public ObservableCollection<ZoneDefinition> Zones { get; } = [];
     public ObservableCollection<GroupChoice> GroupChoices { get; } = [];
+    public ObservableCollection<string> ComPorts { get; } = [];
+    public ObservableCollection<NdiAdapterChoice> NdiAdapters { get; } = [];
+    public ObservableCollection<NdiZoneStreamItem> NdiZoneStreams { get; } = [];
 
     [ObservableProperty] private ImageSource? _previewImage;
     [ObservableProperty] private CompositionLayer? _selectedLayer;
@@ -67,6 +78,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private ScaleMode _selectedScaleMode = ScaleMode.Native;
     [ObservableProperty] private string _outputName = "MAM-Pixelmap";
     [ObservableProperty] private bool _ndiSending = true;
+    [ObservableProperty] private NdiAdapterChoice? _selectedNdiAdapter;
+    [ObservableProperty] private string _ndiSendingNicText = "Sendet: …";
+    private int _nicProbeTick;
+    private bool _ndiAdapterReady;
+    private bool _suppressNdiStreamRecreate;
     [ObservableProperty] private bool _showBackgroundInPreview = true;
     [ObservableProperty] private bool _showBackgroundInOutput = false;
     [ObservableProperty] private bool _showLayerOverlays = true;
@@ -78,8 +94,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private int _canvasHeight;
     [ObservableProperty] private double _previewZoom = 1.0;
     [ObservableProperty] private double _carouselDurationSeconds = 1.0;
+    [ObservableProperty] private double _fadeDurationSeconds = 2.0;
     [ObservableProperty] private WallCarouselDirection _carouselDirection = WallCarouselDirection.WestToOst;
     [ObservableProperty] private bool _carouselBusy;
+    [ObservableProperty] private LayerGroup? _selectedGroup;
     [ObservableProperty] private bool _floorReflectionEnabled = true;
     [ObservableProperty] private double _floorReflectionOpacity = 0.45;
     [ObservableProperty] private double _floorReflectionBlur = 8;
@@ -88,21 +106,65 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private double _floorReflectionFadeStart = 0;
     [ObservableProperty] private GroupChoice? _selectedGroupChoice;
 
+    [ObservableProperty] private bool _lidarEnabled = true;
+    [ObservableProperty] private string? _selectedComPort;
+    [ObservableProperty] private bool _lidarConnected;
+    [ObservableProperty] private string _lidarStatusText = "LiDAR getrennt";
+    [ObservableProperty] private double _lidarRpm;
+    [ObservableProperty] private int _lidarPointsPerRev;
+    [ObservableProperty] private bool _lidarShowDebugPoints = true;
+    [ObservableProperty] private bool _placingLidarSensor;
+    [ObservableProperty] private double _lidarSensorX;
+    [ObservableProperty] private double _lidarSensorY;
+    [ObservableProperty] private double _lidarRotation;
+    [ObservableProperty] private bool _lidarMirrorX;
+    [ObservableProperty] private double _lidarPixelsPerMeter = 478;
+    [ObservableProperty] private double _lidarFloorWidthM = 12;
+    [ObservableProperty] private double _lidarFloorLengthM = 12;
+    [ObservableProperty] private double _lidarMinDistanceMm = 300;
+    [ObservableProperty] private double _lidarMaxDistanceMm = 12000;
+    [ObservableProperty] private double _lidarForegroundMarginMm = 200;
+    [ObservableProperty] private double _lidarClusterGapMm = 250;
+    [ObservableProperty] private int _lidarMinClusterPoints = 3;
+    [ObservableProperty] private double _lidarMinPersonWidthMm = 70;
+    [ObservableProperty] private double _lidarMaxPersonWidthMm = 900;
+    [ObservableProperty] private double _lidarMinMovementMm = 300;
+    [ObservableProperty] private int _lidarMinHits = 2;
+    [ObservableProperty] private int _lidarHoldMs = 500;
+    [ObservableProperty] private double _lidarSmoothing = 0.35;
+    [ObservableProperty] private double _lidarMaxJumpPx = 120;
+    [ObservableProperty] private int _lidarMinQuality = 10;
+    [ObservableProperty] private double _lidarBlobRadiusM = 0.45;
+    [ObservableProperty] private double _lidarBlobSoftness = 0.65;
+    [ObservableProperty] private double _lidarBlobOpacity = 0.9;
+    [ObservableProperty] private double _lidarBlobBlur = 1.5;
+    [ObservableProperty] private double _lidarBlobColorR = 0.2;
+    [ObservableProperty] private double _lidarBlobColorG = 0.5;
+    [ObservableProperty] private double _lidarBlobColorB = 1.0;
+    [ObservableProperty] private double _lidarTrailLength = 1.5;
+    [ObservableProperty] private double _lidarTrailStrength = 0.5;
+
     public Array ScaleModes { get; } = Enum.GetValues(typeof(ScaleMode));
     public IReadOnlyList<CarouselDirectionChoice> CarouselDirections =>
         WallCarousel.DirectionChoices;
 
+    private CompositionLayer? _roundWest;
+    private CompositionLayer? _roundOst;
+    private CompositionLayer? _roundSud;
     private readonly List<WallMotionTrack> _wallTracks = [];
     private IReadOnlyList<WallCommitSpec> _wallCommits = [];
     private DateTime _wallAnimStart;
+    private DateTime _wallRoundStart;
     private double _wallAnimDuration = 1.0;
     private int _wallCycleIndex;
     private const int WallCyclesPerRound = 3;
     private volatile bool _wallFinishQueued;
     private WallCarouselDirection _wallRoundDirection;
 
-    partial void OnCarouselBusyChanged(bool value) =>
+    partial void OnCarouselBusyChanged(bool value)
+    {
         PushWallsCommand.NotifyCanExecuteChanged();
+    }
 
     public MainViewModel()
     {
@@ -116,6 +178,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         {
             _loadedSession = SessionStore.TryLoad();
             var savedLayout = _loadedSession?.Layout;
+            SelectNdiAdapter(savedLayout?.NdiAdapterId, savedLayout?.NdiAdapterIp, recreateSender: false);
 
             if (savedLayout is not null)
             {
@@ -126,8 +189,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 NdiSending = savedLayout.NdiSending;
                 SelectedScaleMode = savedLayout.SelectedScaleMode;
                 CarouselDurationSeconds = Math.Clamp(savedLayout.CarouselDurationSeconds, 0.3, 5.0);
+                FadeDurationSeconds = Math.Clamp(savedLayout.FadeDurationSeconds, 0.0, 10.0);
                 CarouselDirection = savedLayout.CarouselDirection;
                 ApplyFloorReflectionSettings(savedLayout);
+                ApplyLidarSettings(savedLayout.Lidar);
             }
 
             var mapPath = Path.Combine(assetsDir, "pixelmap.json");
@@ -135,6 +200,19 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             Zones.Clear();
             foreach (var z in _pixelMap.Zones)
                 Zones.Add(z);
+
+            var floor = Zones.FirstOrDefault(z => z.Id.Equals("floor", StringComparison.OrdinalIgnoreCase));
+            if (savedLayout?.Lidar is null && floor is not null)
+                ApplyLidarSettings(LidarSettings.CreateDefaultForFloor(floor));
+
+            _lidar = new LidarTrackingService();
+            SyncLidarServiceSettings(floor);
+            RefreshComPorts();
+            if (savedLayout?.Lidar?.AutoConnect == true && !string.IsNullOrEmpty(savedLayout.Lidar.ComPort))
+            {
+                try { ConnectLidarInternal(savedLayout.Lidar.ComPort); }
+                catch { /* optional auto-connect */ }
+            }
 
             CanvasInfo = $"{_pixelMap.Name}  {_pixelMap.CanvasWidth}×{_pixelMap.CanvasHeight}";
             CanvasWidth = _pixelMap.CanvasWidth;
@@ -145,9 +223,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             StatusText = $"GPU: {_gpu.AdapterName}";
             _hub.AttachGpu(_gpu);
             _compositor = new PixelMapCompositor(_gpu, _pixelMap.CanvasWidth, _pixelMap.CanvasHeight);
-            _previewBuffer = new byte[_compositor.PreviewWidth * _compositor.PreviewHeight * 4];
-            _previewUiBuffer = new byte[_previewBuffer.Length];
-            _previewPresentBuffer = new byte[_previewBuffer.Length];
+            _compositor.PreviewFrameReady += OnPreviewFrameReady;
             _previewBitmap = new WriteableBitmap(
                 _compositor.PreviewWidth, _compositor.PreviewHeight, 96, 96,
                 PixelFormats.Bgra32, null);
@@ -181,16 +257,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 catch (Exception ex) { StatusText = $"Background load warning: {ex.Message}"; }
             }
 
-            _ndiOut = new NdiOutputSender(_gpu, OutputName);
-            try
-            {
-                _ndiOut.Initialize(_pixelMap.CanvasWidth, _pixelMap.CanvasHeight);
-            }
-            catch (Exception ex)
-            {
-                NdiSending = false;
-                StatusText = $"NDI init failed: {ex.Message}";
-            }
+            InitNdiZoneStreams(savedLayout?.EnabledNdiZoneIds);
+            RecreateNdiSender(OutputName);
 
             try { _ndiCatalog = new NdiSourceCatalog(); }
             catch (Exception ex)
@@ -221,13 +289,220 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             };
             _renderThread.Start();
             if (!StatusText.StartsWith("NDI init failed") && !StatusText.StartsWith("WARN:"))
-                StatusText = $"Ready | NDI {NdiFrameSpec.Width}×{NdiFrameSpec.Height} BGRA | {NdiFrameSpec.FormatBufferSizeMb()}";
+                StatusText = $"Ready | NDI {NdiFrameSpec.Width}×{NdiFrameSpec.Height} UYVY SpeedHQ {NdiFrameSpec.TargetFps}fps 10GbE | {NdiFrameSpec.FormatBufferSizeMb()}";
         }
         catch (Exception ex)
         {
             StatusText = $"Init failed: {ex.Message}";
             MessageBox.Show(ex.ToString(), "NdiMergerLPM");
         }
+    }
+
+    [RelayCommand]
+    private void RefreshComPorts()
+    {
+        ComPorts.Clear();
+        foreach (var port in LidarTrackingService.ListPorts())
+            ComPorts.Add(port);
+    }
+
+    [RelayCommand]
+    private void RefreshNdiAdapters()
+    {
+        SelectNdiAdapter(SelectedNdiAdapter?.Id, SelectedNdiAdapter?.Ipv4, recreateSender: false);
+    }
+
+    [RelayCommand]
+    private void BindNdiAdapter()
+    {
+        if (SelectedNdiAdapter is null)
+            return;
+        ApplyNdiAdapterToAllSenders(SelectedNdiAdapter);
+    }
+
+    [RelayCommand]
+    private void ConnectLidar()
+    {
+        if (string.IsNullOrWhiteSpace(SelectedComPort))
+        {
+            LidarStatusText = "Kein COM-Port gewählt.";
+            return;
+        }
+
+        try
+        {
+            ConnectLidarInternal(SelectedComPort);
+        }
+        catch (Exception ex)
+        {
+            LidarConnected = false;
+            LidarStatusText = $"Verbindung fehlgeschlagen: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private void DisconnectLidar()
+    {
+        _lidar?.Disconnect();
+        LidarConnected = false;
+        LidarRpm = 0;
+        LidarPointsPerRev = 0;
+        LidarStatusText = "LiDAR getrennt";
+    }
+
+    [RelayCommand]
+    private void ResetLidarBackground() => _lidar?.ResetBackground();
+
+    [RelayCommand]
+    private void TogglePlaceLidarSensor() => PlacingLidarSensor = !PlacingLidarSensor;
+
+    private void ConnectLidarInternal(string port)
+    {
+        _lidar ??= new LidarTrackingService();
+        var floor = Zones.FirstOrDefault(z => z.Id.Equals("floor", StringComparison.OrdinalIgnoreCase));
+        SyncLidarServiceSettings(floor);
+        _lidar.Disconnect();
+        _lidar.Connect(port);
+        LidarConnected = true;
+        LidarStatusText = $"Verbunden: {port}";
+    }
+
+    private void SyncLidarServiceSettings(ZoneDefinition? floor)
+    {
+        _lidar?.ApplySettings(BuildLidarSettings(), floor);
+    }
+
+    private LidarSettings BuildLidarSettings()
+    {
+        return new LidarSettings
+        {
+            Enabled = LidarEnabled,
+            ComPort = SelectedComPort,
+            AutoConnect = !string.IsNullOrEmpty(SelectedComPort),
+            SensorXPx = (float)LidarSensorX,
+            SensorYPx = (float)LidarSensorY,
+            RotationDegrees = (float)LidarRotation,
+            MirrorX = LidarMirrorX,
+            PixelsPerMeter = (float)LidarPixelsPerMeter,
+            FloorWidthMeters = (float)LidarFloorWidthM,
+            FloorLengthMeters = (float)LidarFloorLengthM,
+            MinDistanceMm = (float)LidarMinDistanceMm,
+            MaxDistanceMm = (float)LidarMaxDistanceMm,
+            ShowDebugPoints = LidarShowDebugPoints,
+            ForegroundMarginMm = (float)LidarForegroundMarginMm,
+            ClusterGapMm = (float)LidarClusterGapMm,
+            MinClusterPoints = LidarMinClusterPoints,
+            MinPersonWidthMm = (float)LidarMinPersonWidthMm,
+            MaxPersonWidthMm = (float)LidarMaxPersonWidthMm,
+            MinMovementMm = (float)LidarMinMovementMm,
+            MinHits = LidarMinHits,
+            HoldMs = LidarHoldMs,
+            SmoothingAlpha = (float)LidarSmoothing,
+            MaxJumpPx = (float)LidarMaxJumpPx,
+            MinQuality = LidarMinQuality,
+            BlobRadiusMeters = (float)LidarBlobRadiusM,
+            BlobSoftness = (float)LidarBlobSoftness,
+            BlobOpacity = (float)LidarBlobOpacity,
+            BlobBlurPixels = (float)LidarBlobBlur,
+            BlobColorR = (float)LidarBlobColorR,
+            BlobColorG = (float)LidarBlobColorG,
+            BlobColorB = (float)LidarBlobColorB,
+            TrailLengthSeconds = (float)LidarTrailLength,
+            TrailStrength = (float)LidarTrailStrength
+        };
+    }
+
+    private void ApplyLidarSettings(LidarSettings? settings)
+    {
+        if (settings is null)
+            return;
+
+        LidarEnabled = settings.Enabled;
+        SelectedComPort = settings.ComPort;
+        LidarSensorX = settings.SensorXPx;
+        LidarSensorY = settings.SensorYPx;
+        LidarRotation = settings.RotationDegrees;
+        LidarMirrorX = settings.MirrorX;
+        LidarPixelsPerMeter = settings.PixelsPerMeter;
+        LidarFloorWidthM = settings.FloorWidthMeters;
+        LidarFloorLengthM = settings.FloorLengthMeters > 0.1f
+            ? settings.FloorLengthMeters
+            : DeriveFloorLengthMeters(settings.PixelsPerMeter);
+        LidarMinDistanceMm = settings.MinDistanceMm;
+        LidarMaxDistanceMm = settings.MaxDistanceMm;
+        LidarShowDebugPoints = settings.ShowDebugPoints;
+        LidarForegroundMarginMm = settings.ForegroundMarginMm;
+        LidarClusterGapMm = settings.ClusterGapMm;
+        LidarMinClusterPoints = settings.MinClusterPoints;
+        LidarMinPersonWidthMm = settings.MinPersonWidthMm;
+        LidarMaxPersonWidthMm = settings.MaxPersonWidthMm;
+        LidarMinMovementMm = settings.MinMovementMm;
+        LidarMinHits = settings.MinHits;
+        LidarHoldMs = settings.HoldMs;
+        LidarSmoothing = settings.SmoothingAlpha;
+        LidarMaxJumpPx = settings.MaxJumpPx;
+        LidarMinQuality = settings.MinQuality;
+        LidarBlobRadiusM = settings.BlobRadiusMeters;
+        LidarBlobSoftness = settings.BlobSoftness;
+        LidarBlobOpacity = settings.BlobOpacity;
+        LidarBlobBlur = settings.BlobBlurPixels;
+        LidarBlobColorR = settings.BlobColorR;
+        LidarBlobColorG = settings.BlobColorG;
+        LidarBlobColorB = settings.BlobColorB;
+        LidarTrailLength = settings.TrailLengthSeconds;
+        LidarTrailStrength = settings.TrailStrength;
+    }
+
+    partial void OnLidarFloorWidthMChanged(double value)
+    {
+        if (_updatingLidarFloorMeters)
+            return;
+
+        var floor = Zones.FirstOrDefault(z => z.Id.Equals("floor", StringComparison.OrdinalIgnoreCase));
+        if (floor is null || value <= 0.1)
+            return;
+
+        _updatingLidarFloorMeters = true;
+        try
+        {
+            LidarPixelsPerMeter = floor.Width / value;
+            LidarFloorLengthM = floor.Height / LidarPixelsPerMeter;
+        }
+        finally
+        {
+            _updatingLidarFloorMeters = false;
+        }
+    }
+
+    partial void OnLidarFloorLengthMChanged(double value)
+    {
+        if (_updatingLidarFloorMeters)
+            return;
+
+        var floor = Zones.FirstOrDefault(z => z.Id.Equals("floor", StringComparison.OrdinalIgnoreCase));
+        if (floor is null || value <= 0.1)
+            return;
+
+        _updatingLidarFloorMeters = true;
+        try
+        {
+            LidarPixelsPerMeter = floor.Height / value;
+            LidarFloorWidthM = floor.Width / LidarPixelsPerMeter;
+        }
+        finally
+        {
+            _updatingLidarFloorMeters = false;
+        }
+    }
+
+    private bool _updatingLidarFloorMeters;
+
+    private double DeriveFloorLengthMeters(double pixelsPerMeter)
+    {
+        var floor = Zones.FirstOrDefault(z => z.Id.Equals("floor", StringComparison.OrdinalIgnoreCase));
+        if (floor is null || pixelsPerMeter <= 0.1)
+            return LidarFloorLengthM;
+        return floor.Height / pixelsPerMeter;
     }
 
     [RelayCommand]
@@ -300,9 +575,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             ZIndex = Layers.Count,
             NativeWidth = nativeW,
             NativeHeight = nativeH,
+            CropX = 0,
+            CropY = 0,
+            CropW = nativeW,
+            CropH = nativeH,
             X = 100,
             Y = 100
         };
+        layer.SnapDrawOpacity();
 
         if (SelectedZone is not null)
             layer.ApplyZone(SelectedZone, SelectedScaleMode);
@@ -310,6 +590,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         Layers.Add(layer);
         SelectedLayer = layer;
         RebuildLayerTree();
+        if (runtime is BrowserVideoSource browser)
+            StatusText = $"{displayName} · capture={browser.CaptureMode}";
     }
 
     [RelayCommand]
@@ -345,12 +627,18 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             GroupId = src.GroupId,
             Visible = src.Visible,
             ParentGroupVisible = src.ParentGroupVisible,
+            ParentGroupDrawOpacity = src.ParentGroupDrawOpacity,
             ZIndex = Layers.Count,
             NativeWidth = src.NativeWidth,
             NativeHeight = src.NativeHeight,
+            CropX = src.CropX,
+            CropY = src.CropY,
+            CropW = src.CropW,
+            CropH = src.CropH,
             BlackKeyEnabled = src.BlackKeyEnabled,
             BlackKeyThreshold = src.BlackKeyThreshold
         };
+        copy.SnapDrawOpacity();
 
         Layers.Add(copy);
         SelectedLayer = copy;
@@ -370,8 +658,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             Name = $"Group {Groups.Count + 1}",
             SortOrder = Groups.Count,
             Visible = true,
+            Opacity = 1f,
             IsExpanded = true
         };
+        group.SnapDrawOpacity();
         group.PropertyChanged += OnGroupPropertyChanged;
         Groups.Add(group);
 
@@ -379,6 +669,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         {
             layer.GroupId = group.Id;
             layer.ParentGroupVisible = group.Visible;
+            layer.ParentGroupDrawOpacity = group.DrawOpacity;
             layer.MarkedForGroup = false;
         }
 
@@ -417,6 +708,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         {
             layer.GroupId = target.Id;
             layer.ParentGroupVisible = target.Visible;
+            layer.ParentGroupDrawOpacity = target.DrawOpacity;
             layer.MarkedForGroup = false;
         }
 
@@ -464,6 +756,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         {
             layer.GroupId = null;
             layer.ParentGroupVisible = true;
+            layer.ParentGroupDrawOpacity = 1f;
         }
 
         group.PropertyChanged -= OnGroupPropertyChanged;
@@ -503,8 +796,33 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private void SnapToZone()
     {
         if (SelectedLayer is null || SelectedZone is null) return;
-        SelectedLayer.ApplyZone(SelectedZone, SelectedScaleMode);
+        var group = WallCarousel.ResolveGroup(SelectedZone.Id);
+        var zone = group is not null
+            ? WallCarousel.BuildTargetZone(group.Value, Zones)
+            : SelectedZone;
+        SelectedLayer.ApplyZone(zone, SelectedScaleMode);
         OnPropertyChanged(nameof(SelectedLayer));
+    }
+
+    [RelayCommand]
+    private void ResetSelectedLayerCrop()
+    {
+        if (SelectedLayer is null) return;
+        SelectedLayer.ResetCrop();
+        RefitLayerIfZoned(SelectedLayer);
+    }
+
+    private void RefitLayerIfZoned(CompositionLayer? layer)
+    {
+        if (layer?.ZoneId is null || CarouselBusy)
+            return;
+
+        var group = WallCarousel.ResolveGroup(layer.ZoneId);
+        ZoneDefinition? zone = group is not null
+            ? WallCarousel.BuildTargetZone(group.Value, Zones)
+            : PixelMapLoader.FindZone(_pixelMap, layer.ZoneId);
+        if (zone is not null)
+            layer.ApplyZone(zone, layer.ScaleMode, applyZoneRotation: false);
     }
 
     [RelayCommand(CanExecute = nameof(CanPushWalls))]
@@ -525,7 +843,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             _wallCycleIndex = 0;
             _wallRoundDirection = CarouselDirection;
             _wallFinishQueued = false;
-            StatusText = "Volle Runde startet (3× synchron)…";
+            _wallAnimDuration = Math.Clamp(CarouselDurationSeconds, 0.3, 5.0);
+            _wallRoundStart = DateTime.UtcNow;
+            ApplyFpsStatusText();
             BeginSimultaneousCycle();
         }
         catch (Exception ex)
@@ -543,6 +863,9 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _wallTracks.Clear();
         _wallCommits = [];
         _wallCycleIndex = 0;
+        _roundWest = null;
+        _roundOst = null;
+        _roundSud = null;
         _wallFinishQueued = false;
         CarouselBusy = false;
         StatusText = message;
@@ -565,31 +888,53 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
-        var cycle = WallCarousel.TryBuildSimultaneousCycle(zoneList, layerList, _wallRoundDirection);
-        if (cycle is null)
+        var westLayer = WallCarousel.FindLayerForGroup(WallGroup.West, zoneList, layerList);
+        var ostLayer = WallCarousel.FindLayerForGroup(WallGroup.Ost, zoneList, layerList);
+        var sudLayer = WallCarousel.FindLayerForGroup(WallGroup.Sud, zoneList, layerList);
+        if (westLayer is null || ostLayer is null || sudLayer is null ||
+            westLayer == ostLayer || ostLayer == sudLayer || sudLayer == westLayer)
         {
             AbortWallCarousel("Wand-Runde konnte nicht gestartet werden.");
             return;
         }
 
-        _wallTracks.Clear();
-        _wallTracks.AddRange(cycle.Tracks);
-        _wallCommits = cycle.Commits;
+        _roundWest = westLayer;
+        _roundOst = ostLayer;
+        _roundSud = sudLayer;
+        var cycle = WallCarousel.BuildSimultaneousCycle(
+            zoneList, westLayer, ostLayer, sudLayer, _wallRoundDirection);
 
         lock (_renderLock)
-        {
-            foreach (var commit in cycle.Commits)
-                commit.Original.Opacity = 0f;
-
-            InsertMovingCopiesAboveSources(cycle.MovingCopies);
-        }
+            ArmCycleLocked(cycle);
 
         Reindex();
         _wallAnimDuration = Math.Clamp(CarouselDurationSeconds, 0.3, 5.0);
         _wallAnimStart = DateTime.UtcNow;
         _wallFinishQueued = false;
-        int step = _wallCycleIndex + 1;
-        StatusText = $"Runde Schritt {step}/{WallCyclesPerRound} — 3 Wände gleichzeitig…";
+        ApplyFpsStatusText();
+    }
+
+    private void ArmCycleLocked(WallSimultaneousCycle cycle)
+    {
+        _wallTracks.Clear();
+        _wallTracks.AddRange(cycle.Tracks);
+        _wallCommits = cycle.Commits;
+
+        foreach (var commit in cycle.Commits)
+            commit.Original.SetOpacityImmediate(0f);
+
+        InsertMovingCopiesAboveSources(cycle.MovingCopies);
+    }
+
+    private void RotateRoundOccupants()
+    {
+        if (_roundWest is null || _roundOst is null || _roundSud is null)
+            return;
+
+        if (_wallRoundDirection == WallCarouselDirection.WestToOst)
+            (_roundWest, _roundOst, _roundSud) = (_roundSud, _roundWest, _roundOst);
+        else
+            (_roundWest, _roundOst, _roundSud) = (_roundOst, _roundSud, _roundWest);
     }
 
     private void AdvanceWallCarouselLocked()
@@ -598,7 +943,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             return;
 
         double t = Math.Min(1.0, (DateTime.UtcNow - _wallAnimStart).TotalSeconds / _wallAnimDuration);
-        float u = SmoothStep((float)t);
+        float u = (float)t;
 
         foreach (var track in _wallTracks)
         {
@@ -640,6 +985,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
         try
         {
+            bool continueRound;
             lock (_renderLock)
             {
                 foreach (var commit in _wallCommits)
@@ -651,24 +997,49 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                     o.Scale = commit.EndScale;
                     o.RotationDegrees = commit.EndRotation;
                     o.ScaleMode = commit.EndScaleMode;
-                    o.Opacity = commit.SavedOpacity;
                     o.Visible = true;
+                    o.SetOpacityImmediate(0f);
+                }
+
+                RemoveMovingCopies();
+                _wallTracks.Clear();
+                _wallCommits = [];
+                _wallCycleIndex++;
+
+                continueRound = _wallCycleIndex < WallCyclesPerRound;
+                if (continueRound)
+                {
+                    RotateRoundOccupants();
+                    if (_roundWest is null || _roundOst is null || _roundSud is null)
+                    {
+                        RestoreWallOpacitiesLocked();
+                        continueRound = false;
+                    }
+                    else
+                    {
+                        var cycle = WallCarousel.BuildSimultaneousCycle(
+                            Zones.ToList(), _roundWest, _roundOst, _roundSud, _wallRoundDirection);
+                        ArmCycleLocked(cycle);
+                        _wallAnimDuration = Math.Clamp(CarouselDurationSeconds, 0.3, 5.0);
+                        _wallAnimStart = DateTime.UtcNow;
+                    }
+                }
+                else
+                {
+                    RestoreWallOpacitiesLocked();
                 }
             }
 
-            CleanupMovingCopies();
-            _wallTracks.Clear();
-            _wallCommits = [];
-
-            _wallCycleIndex++;
-            if (_wallCycleIndex < WallCyclesPerRound)
+            Reindex();
+            if (continueRound)
             {
-                BeginSimultaneousCycle();
+                ApplyFpsStatusText();
                 return;
             }
 
+            RebuildLayerTree();
             CarouselBusy = false;
-            StatusText = "Volle Runde fertig — wieder am Ausgangspunkt";
+            ApplyFpsStatusText();
         }
         catch (Exception ex)
         {
@@ -677,25 +1048,32 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    private void CleanupMovingCopies()
+    private void RestoreWallOpacitiesLocked()
     {
-        for (int i = Layers.Count - 1; i >= 0; i--)
-        {
-            if (WallCarousel.IsMovingCopy(Layers[i]))
-                Layers.RemoveAt(i);
-        }
-
-        // Restore any originals left invisible if a hop aborted.
         foreach (var layer in Layers)
         {
             if (!WallCarousel.IsMovingCopy(layer) &&
                 WallCarousel.ResolveGroup(layer.ZoneId) is not null &&
                 layer.Opacity <= 0.01f)
             {
-                layer.Opacity = 1f;
+                layer.SetOpacityImmediate(1f);
             }
         }
+    }
 
+    private void RemoveMovingCopies()
+    {
+        for (int i = Layers.Count - 1; i >= 0; i--)
+        {
+            if (WallCarousel.IsMovingCopy(Layers[i]))
+                Layers.RemoveAt(i);
+        }
+    }
+
+    private void CleanupMovingCopies()
+    {
+        RemoveMovingCopies();
+        RestoreWallOpacitiesLocked();
         Reindex();
         RebuildLayerTree();
     }
@@ -776,17 +1154,23 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             SelectedZone?.Id,
             selectedLayerKey,
             CarouselDurationSeconds,
+            FadeDurationSeconds,
             CarouselDirection,
             FloorReflectionEnabled,
             (float)FloorReflectionOpacity,
             (float)FloorReflectionBlur,
             (float)FloorReflectionLength,
             (float)FloorReflectionAngle,
-            (float)FloorReflectionFadeStart);
+            (float)FloorReflectionFadeStart,
+            BuildLidarSettings(),
+            SelectedNdiAdapter?.Id,
+            SelectedNdiAdapter?.Ipv4,
+            NdiZoneStreams.Where(s => s.Enabled).Select(s => s.ZoneId));
     }
 
     private void ApplySettings(LayoutDocument doc)
     {
+        SelectNdiAdapter(doc.NdiAdapterId, doc.NdiAdapterIp, recreateSender: _gpu is not null);
         OutputName = doc.OutputName;
         ShowBackgroundInOutput = doc.ShowBackgroundInOutput;
         ShowBackgroundInPreview = doc.ShowBackgroundInPreview;
@@ -794,8 +1178,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         NdiSending = doc.NdiSending;
         SelectedScaleMode = doc.SelectedScaleMode;
         CarouselDurationSeconds = Math.Clamp(doc.CarouselDurationSeconds, 0.3, 5.0);
+        FadeDurationSeconds = Math.Clamp(doc.FadeDurationSeconds, 0.0, 10.0);
         CarouselDirection = doc.CarouselDirection;
         ApplyFloorReflectionSettings(doc);
+        ApplyLidarSettings(doc.Lidar);
+        ApplyEnabledNdiZones(doc.EnabledNdiZoneIds);
         if (Zones.Count > 0)
         {
             SelectedZone = string.IsNullOrEmpty(doc.SelectedZoneId)
@@ -829,9 +1216,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 Id = gid,
                 Name = string.IsNullOrWhiteSpace(ge.Name) ? "Group" : ge.Name,
                 Visible = ge.Visible,
+                Opacity = Math.Clamp(ge.Opacity ?? 1f, 0f, 1f),
                 IsExpanded = ge.IsExpanded,
                 SortOrder = ge.SortOrder
             };
+            group.SnapDrawOpacity();
             group.PropertyChanged += OnGroupPropertyChanged;
             Groups.Add(group);
         }
@@ -857,16 +1246,20 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 groupId = parsed;
 
             bool parentVisible = true;
+            float parentDraw = 1f;
             if (groupId is Guid gid)
             {
                 var group = Groups.FirstOrDefault(g => g.Id == gid);
                 if (group is null)
                     groupId = null;
                 else
+                {
                     parentVisible = group.Visible;
+                    parentDraw = group.DrawOpacity;
+                }
             }
 
-            Layers.Add(new CompositionLayer
+            var layer = new CompositionLayer
             {
                 Name = e.Name,
                 SourceKind = e.SourceKind,
@@ -875,18 +1268,26 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 Y = e.Y,
                 Scale = e.Scale,
                 RotationDegrees = e.RotationDegrees,
-                Opacity = e.Opacity,
+                Opacity = Math.Clamp(e.Opacity, 0f, 1f),
                 ScaleMode = e.ScaleMode,
                 ZoneId = e.ZoneId,
                 GroupId = groupId,
                 ParentGroupVisible = parentVisible,
+                ParentGroupDrawOpacity = parentDraw,
                 Visible = e.Visible,
                 ZIndex = e.ZIndex,
                 NativeWidth = nativeW,
                 NativeHeight = nativeH,
+                CropX = e.CropX,
+                CropY = e.CropY,
+                CropW = e.CropW,
+                CropH = e.CropH,
                 BlackKeyEnabled = e.BlackKeyEnabled,
                 BlackKeyThreshold = e.BlackKeyThreshold > 0 ? e.BlackKeyThreshold : 0.08f
-            });
+            };
+            layer.SyncCropToNativeSize(e.NativeWidth, e.NativeHeight);
+            layer.SnapDrawOpacity();
+            Layers.Add(layer);
         }
 
         if (!string.IsNullOrEmpty(doc.SelectedLayerKey))
@@ -977,7 +1378,60 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private void SyncParentGroupVisible(LayerGroup group)
     {
         foreach (var layer in Layers.Where(l => l.GroupId == group.Id))
+        {
             layer.ParentGroupVisible = group.Visible;
+            layer.ParentGroupDrawOpacity = group.DrawOpacity;
+        }
+    }
+
+    private void TickFades(float dt)
+    {
+        double dur = FadeDurationSeconds;
+        if (double.IsNaN(dur) || dur < 0) dur = 0;
+        else if (dur > 10) dur = 10;
+        float duration = (float)dur;
+
+        var groups = Groups;
+        for (int gi = 0; gi < groups.Count; gi++)
+        {
+            var group = groups[gi];
+            float before = group.DrawOpacity;
+            bool animating = group.TickFade(dt, duration);
+            if (!animating && group.DrawOpacity == before)
+                continue;
+
+            // Push group fade to members only while the group opacity is moving.
+            float draw = group.DrawOpacity;
+            Guid id = group.Id;
+            var layers = Layers;
+            for (int li = 0; li < layers.Count; li++)
+            {
+                var layer = layers[li];
+                if (layer.GroupId == id)
+                    layer.ParentGroupDrawOpacity = draw;
+            }
+        }
+
+        var allLayers = Layers;
+        for (int i = 0; i < allLayers.Count; i++)
+        {
+            var layer = allLayers[i];
+            if (layer.GroupId is null)
+                layer.ParentGroupDrawOpacity = 1f;
+            layer.TickFade(dt, duration);
+        }
+    }
+
+    private float ComputeFadeDt()
+    {
+        long qpc = System.Diagnostics.Stopwatch.GetTimestamp();
+        float dt;
+        if (_lastFadeQpc == 0)
+            dt = 1f / 60f;
+        else
+            dt = (float)((qpc - _lastFadeQpc) / (double)System.Diagnostics.Stopwatch.Frequency);
+        _lastFadeQpc = qpc;
+        return Math.Clamp(dt, 0f, 0.1f);
     }
 
     private void RebuildLayerTree()
@@ -1057,18 +1511,35 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     partial void OnSelectedTreeNodeChanged(LayerTreeNode? value)
     {
+        if (value is { IsGroup: true, Group: not null })
+        {
+            SelectedGroup = value.Group;
+            return;
+        }
+
         if (value is { IsGroup: false, Layer: not null })
         {
             if (!ReferenceEquals(SelectedLayer, value.Layer))
                 SelectedLayer = value.Layer;
+            SelectedGroup = value.Layer.GroupId is Guid gid
+                ? Groups.FirstOrDefault(g => g.Id == gid)
+                : null;
+        }
+        else
+        {
+            SelectedGroup = null;
         }
     }
 
-    private CompositionLayer? _hudLayer;
-    private bool _suppressGroupChoiceAssign;
+    partial void OnSelectedGroupChanged(LayerGroup? value) =>
+        OnPropertyChanged(nameof(HasSelectedGroup));
+
+    public bool HasSelectedGroup => SelectedGroup is not null;
 
     partial void OnSelectedLayerChanged(CompositionLayer? value)
     {
+        OnPropertyChanged(nameof(HasSelectedLayer));
+
         if (_hudLayer is not null)
             _hudLayer.PropertyChanged -= OnSelectedLayerPropertyChanged;
         _hudLayer = value;
@@ -1078,15 +1549,36 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         UpdateSelectedSourceHud();
         SyncSelectedTreeNode();
         SyncGroupChoiceFromLayer();
+        if (value?.GroupId is Guid gid)
+            SelectedGroup = Groups.FirstOrDefault(g => g.Id == gid);
+        else if (SelectedTreeNode is not { IsGroup: true })
+            SelectedGroup = null;
     }
+
+    public bool HasSelectedLayer => SelectedLayer is not null;
+
+    private CompositionLayer? _hudLayer;
+    private bool _suppressGroupChoiceAssign;
 
     private void OnSelectedLayerPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
         if (e.PropertyName is nameof(CompositionLayer.Name)
             or nameof(CompositionLayer.NativeWidth)
-            or nameof(CompositionLayer.NativeHeight))
+            or nameof(CompositionLayer.NativeHeight)
+            or nameof(CompositionLayer.CropX)
+            or nameof(CompositionLayer.CropY)
+            or nameof(CompositionLayer.CropW)
+            or nameof(CompositionLayer.CropH))
         {
             UpdateSelectedSourceHud();
+        }
+
+        if (e.PropertyName is nameof(CompositionLayer.CropX)
+            or nameof(CompositionLayer.CropY)
+            or nameof(CompositionLayer.CropW)
+            or nameof(CompositionLayer.CropH))
+        {
+            RefitLayerIfZoned(SelectedLayer);
         }
     }
 
@@ -1098,7 +1590,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
-        SelectedSourceHud = $"{SelectedLayer.Name}\n{SelectedLayer.NativeWidth}×{SelectedLayer.NativeHeight}";
+        var (cw, ch) = SelectedLayer.GetSourcePixelSize();
+        SelectedSourceHud = SelectedLayer.HasCrop
+            ? $"{SelectedLayer.Name}\n{SelectedLayer.NativeWidth}×{SelectedLayer.NativeHeight} → {cw}×{ch}"
+            : $"{SelectedLayer.Name}\n{SelectedLayer.NativeWidth}×{SelectedLayer.NativeHeight}";
     }
 
     private void SyncGroupChoiceFromLayer()
@@ -1132,10 +1627,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         {
             var group = Groups.FirstOrDefault(g => g.Id == gid);
             SelectedLayer.ParentGroupVisible = group?.Visible ?? true;
+            SelectedLayer.ParentGroupDrawOpacity = group?.DrawOpacity ?? 1f;
+            SelectedGroup = group;
         }
         else
         {
             SelectedLayer.ParentGroupVisible = true;
+            SelectedLayer.ParentGroupDrawOpacity = 1f;
+            SelectedGroup = null;
         }
 
         RebuildLayerTree();
@@ -1147,93 +1646,202 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
         // Apply status on the UI thread without BeginInvoke storms from the render loop.
         var status = _pendingStatus;
-        if (status is not null && !CarouselBusy)
+        if (status is not null)
         {
             _pendingStatus = null;
             if (status == "fps")
-            {
-                var conns = _ndiOut?.ConnectionCount ?? 0;
-                var ndiRes = _ndiOut is { IsActive: true }
-                    ? $"{_ndiOut.OutputWidth}×{_ndiOut.OutputHeight}"
-                    : "off";
-                var bufMb = _ndiOut?.BufferSizeBytes > 0
-                    ? $"{_ndiOut.BufferSizeBytes / (1024.0 * 1024.0):0} MB/frame"
-                    : NdiFrameSpec.FormatBufferSizeMb();
-                var ndiBw = _ndiOut is { IsActive: true } && _ndiOut.SendBytesPerSecond > 0
-                    ? NdiFrameSpec.FormatBandwidthGb(_ndiOut.SendBytesPerSecond)
-                    : "—";
-                StatusText =
-                    $"FPS {_renderFps:0.0} | NDI {ndiRes} {ndiBw} | {bufMb} | viewers={conns} | Layers={Layers.Count}";
-            }
-            else
-            {
+                ApplyFpsStatusText();
+            else if (!CarouselBusy)
                 StatusText = status;
-            }
         }
 
-        if (_previewDirty && _previewBitmap is not null && _previewUiBuffer is not null &&
-            _previewPresentBuffer is not null && _compositor is not null)
-        {
-            int w = _compositor.PreviewWidth;
-            int h = _compositor.PreviewHeight;
-            int bytes = w * h * 4;
-            bool present = false;
-            // Hold the render lock only for a tiny memcpy — never during WritePixels (WPF).
-            lock (_renderLock)
-            {
-                if (_previewDirty)
-                {
-                    Buffer.BlockCopy(_previewUiBuffer, 0, _previewPresentBuffer, 0, bytes);
-                    _previewDirty = false;
-                    present = true;
-                }
-            }
+        PresentPreview();
 
-            if (present)
-                _previewBitmap.WritePixels(new Int32Rect(0, 0, w, h), _previewPresentBuffer, w * 4, 0);
+        if (++_nicProbeTick >= 15)
+        {
+            _nicProbeTick = 0;
+            var sending = NdiSendPathProbe.Describe(CountNdiViewers(), NdiAdapterBinding.CurrentAllowedIpv4s);
+            if (sending != NdiSendingNicText)
+                NdiSendingNicText = sending;
         }
 
         Fps = _renderFps;
+
+        var lidarStatus = _pendingLidarStatus;
+        if (lidarStatus is not null)
+        {
+            _pendingLidarStatus = null;
+            LidarStatusText = lidarStatus;
+            LidarConnected = _pendingLidarConnected;
+            LidarRpm = _pendingLidarRpm;
+            LidarPointsPerRev = _pendingLidarPointsPerRev;
+        }
+    }
+
+    private int CountNdiViewers()
+    {
+        var n = 0;
+        if (_ndiOut is { IsActive: true })
+            n += _ndiOut.ConnectionCount;
+        foreach (var item in NdiZoneStreams)
+        {
+            if (item.Enabled && item.Stream.Sender is { IsActive: true } sender)
+                n += sender.ConnectionCount;
+        }
+        return n;
+    }
+
+    private void ApplyFpsStatusText()
+    {
+        string head = CarouselBusy
+            ? $"Karussell {_wallCycleIndex + 1}/{WallCyclesPerRound} | Compose {_renderFps:0.0} | Preview {_previewFps:0.0} | Layers={Layers.Count}"
+            : $"Compose {_renderFps:0.0} | Preview {_previewFps:0.0} | Layers={Layers.Count}";
+        StatusText = head + Environment.NewLine + FormatActiveNdiStatus();
+    }
+
+    private string FormatActiveNdiStatus()
+    {
+        var lines = new List<string>();
+        double totalBw = 0;
+        int totalViewers = 0;
+
+        void AddSender(string label, NdiOutputSender sender)
+        {
+            var fps = sender.SendFps > 0 ? $"{sender.SendFps:0.0}fps" : "—";
+            var bw = sender.SendBytesPerSecond > 0
+                ? NdiFrameSpec.FormatBandwidthGb(sender.SendBytesPerSecond)
+                : "—";
+            var mb = sender.BufferSizeBytes > 0
+                ? $"{sender.BufferSizeBytes / (1024.0 * 1024.0):0}MB"
+                : "—";
+            lines.Add(
+                $"  {label} {sender.OutputWidth}×{sender.OutputHeight} {sender.PixelFormat} {fps} {bw} {mb}/f viewers={sender.ConnectionCount}");
+            totalBw += sender.SendBytesPerSecond;
+            totalViewers += sender.ConnectionCount;
+        }
+
+        if (_ndiOut is { IsActive: true })
+            AddSender("Full", _ndiOut);
+
+        foreach (var item in NdiZoneStreams)
+        {
+            if (!item.Enabled || item.Stream.Sender is not { IsActive: true } sender)
+                continue;
+            AddSender(item.Stream.NameSuffix, sender);
+        }
+
+        if (lines.Count == 0)
+            return "NDI off";
+
+        var nic = SelectedNdiAdapter is null || SelectedNdiAdapter.IsAutomatic
+            ? "NIC auto"
+            : SelectedNdiAdapter.DisplayName;
+        var header = totalBw > 0
+            ? $"NDI×{lines.Count} {nic} total {NdiFrameSpec.FormatBandwidthGb(totalBw)} viewers={totalViewers}"
+            : $"NDI×{lines.Count} {nic} viewers={totalViewers}";
+        return header + Environment.NewLine + string.Join(Environment.NewLine, lines);
+    }
+
+    private void OnPreviewFrameReady()
+    {
+        if (_disposed || _renderExit)
+            return;
+        if (Interlocked.Exchange(ref _previewPresentQueued, 1) == 1)
+            return;
+        var disp = Application.Current?.Dispatcher;
+        if (disp is null)
+        {
+            Interlocked.Exchange(ref _previewPresentQueued, 0);
+            return;
+        }
+        disp.BeginInvoke(DispatcherPriority.Render, PresentPreviewFromPack);
+    }
+
+    private void PresentPreviewFromPack()
+    {
+        Interlocked.Exchange(ref _previewPresentQueued, 0);
+        PresentPreview();
+    }
+
+    private void PresentPreview()
+    {
+        if (_previewBitmap is null || _compositor is null || _gpu is null || _renderExit)
+            return;
+
+        int gen = _compositor.PreviewGeneration;
+        if (gen == _lastPreviewGen || !_compositor.TryGetPublishedPreview(out var pixels))
+            return;
+
+        int w = _compositor.PreviewWidth;
+        int h = _compositor.PreviewHeight;
+        _previewBitmap.WritePixels(new Int32Rect(0, 0, w, h), pixels, w * 4, 0);
+        _lastPreviewGen = gen;
     }
 
     private void RenderLoop()
     {
-        // Cap at 60 Hz when compose is cheap so we do not starve WebView2 / DWM on the GPU
-        // without showing as "100% load". If a frame already takes longer (NDI readback), do not wait.
-        const double targetFrameMs = 1000.0 / 60.0;
+        // Match NDI SpeedHQ: compose and send both locked to NdiFrameSpec.TargetFps.
+        // Preview stays ≤30 Hz.
+        const double targetFrameMs = 1000.0 / NdiFrameSpec.TargetFps;
         var watch = System.Diagnostics.Stopwatch.StartNew();
+        double nextMs = 0;
 
-        while (!_renderExit)
+        bool periodRaised = timeBeginPeriod(1) == 0;
+        try
         {
-            double startMs = watch.Elapsed.TotalMilliseconds;
-            try
+            while (!_renderExit)
             {
-                RenderFrame();
-            }
-            catch when (_renderExit)
-            {
-                break;
-            }
-            catch
-            {
-                // keep loop alive; errors surface via StatusText on next successful frame
-            }
+                try
+                {
+                    RenderFrame();
+                }
+                catch when (_renderExit)
+                {
+                    break;
+                }
+                catch
+                {
+                    // keep loop alive; errors surface via StatusText on next successful frame
+                }
 
-            double remaining = targetFrameMs - (watch.Elapsed.TotalMilliseconds - startMs);
-            if (remaining >= 1.0)
-                Thread.Sleep((int)remaining);
+                nextMs += targetFrameMs;
+                double nowMs = watch.Elapsed.TotalMilliseconds;
+                // Missed the slot: skip catch-up so we do not burst into the receiver.
+                if (nowMs > nextMs + targetFrameMs)
+                    nextMs = nowMs;
+                else
+                {
+                    double remaining = nextMs - nowMs;
+                    if (remaining >= 1.5)
+                        Thread.Sleep((int)(remaining - 0.5));
+                    while (!_renderExit && watch.Elapsed.TotalMilliseconds < nextMs)
+                        Thread.SpinWait(50);
+                }
+            }
+        }
+        finally
+        {
+            if (periodRaised)
+                timeEndPeriod(1);
         }
     }
 
     private void RenderFrame()
     {
-        if (_renderExit || _compositor is null || _gpu is null || _previewBuffer is null)
+        if (_renderExit || _compositor is null || _gpu is null)
             return;
 
         try
         {
             _hub.UpdateAll();
 
+            long qpc = System.Diagnostics.Stopwatch.GetTimestamp();
+            double sincePreviewMs = _lastPreviewEmitQpc == 0
+                ? 1e9
+                : (qpc - _lastPreviewEmitQpc) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            bool wantPreview = sincePreviewMs >= (1000.0 / 30.0);
+
+            FloorBlobFrame blobFrame = FloorBlobFrame.Empty;
             lock (_renderLock)
             {
                 if (_renderExit)
@@ -1246,8 +1854,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                     if (src.Width > 0 && src.Height > 0 &&
                         (layer.NativeWidth != src.Width || layer.NativeHeight != src.Height))
                     {
+                        int prevW = layer.NativeWidth;
+                        int prevH = layer.NativeHeight;
                         layer.NativeWidth = src.Width;
                         layer.NativeHeight = src.Height;
+                        layer.SyncCropToNativeSize(prevW, prevH);
                         if (!CarouselBusy && layer.ZoneId is not null)
                         {
                             var group = WallCarousel.ResolveGroup(layer.ZoneId);
@@ -1261,6 +1872,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 }
 
                 AdvanceWallCarouselLocked();
+                TickFades(ComputeFadeDt());
 
                 ID3D11ShaderResourceView? Resolve(CompositionLayer layer)
                 {
@@ -1277,24 +1889,80 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                     Angle = (float)FloorReflectionAngle,
                     FadeStart = (float)FloorReflectionFadeStart
                 };
-                _compositor.Render(
-                    Layers, Resolve,
-                    ShowBackgroundInPreview, ShowBackgroundInOutput,
-                    Zones, reflection);
+
+                var floor = Zones.FirstOrDefault(z => z.Id.Equals("floor", StringComparison.OrdinalIgnoreCase));
+                SyncLidarServiceSettings(floor);
+                FloorBlobSettings? blobSettings = null;
+                if (LidarEnabled)
+                {
+                    blobFrame = _lidar?.UpdateFrame() ?? FloorBlobFrame.Empty;
+                    blobSettings = BuildLidarSettings().ToBlobSettings();
+                }
+                else
+                {
+                    // Drop blobs from compose/preview immediately; tracker also clears.
+                    _lidar?.UpdateFrame();
+                    blobFrame = FloorBlobFrame.Empty;
+                }
+
+                FloorWaveSettings wave = FloorWaveSettings.Disabled;
+                if (CarouselBusy && _wallAnimDuration > 0.001)
+                {
+                    float roundSeconds = (float)(_wallAnimDuration * WallCyclesPerRound);
+                    float roundT = (float)Math.Clamp(
+                        (DateTime.UtcNow - _wallRoundStart).TotalSeconds / roundSeconds, 0.0, 1.0);
+                    wave = new FloorWaveSettings
+                    {
+                        Enabled = true,
+                        Progress = roundT,
+                        Amplitude = 1f,
+                        Wavelength = 0.20f,
+                        Opacity = 1f
+                    };
+                }
+
+                if (_lidar is not null)
+                {
+                    var status = _lidar.Status;
+                    _pendingLidarConnected = status.IsConnected;
+                    _pendingLidarRpm = (float)status.Rpm;
+                    _pendingLidarPointsPerRev = status.PointsPerRevolution;
+                    if (status.IsConnected)
+                    {
+                        var err = string.IsNullOrEmpty(status.LastError) ? "" : $" | {status.LastError}";
+                        _pendingLidarStatus =
+                            $"LiDAR {status.ComPort} | 0x{status.ScanDataType:X2} | {status.Rpm:0.#} RPM | {status.PointsPerRevolution} pts | {status.Health}{err}";
+                    }
+                }
+
+                // 1) Output canvas (compose cadence matches NDI TargetFps).
+                lock (_gpu.ContextLock)
+                {
+                    _compositor.Render(
+                        Layers, Resolve,
+                        ShowBackgroundInPreview, ShowBackgroundInOutput,
+                        Zones, reflection, blobFrame, blobSettings, wave);
+                }
             }
 
-            if (!_renderExit && NdiSending && _ndiOut is not null && _ndiOut.IsActive)
-                _ndiOut.SendFrame(_compositor.CanvasTexture);
-
-            bool readPreview = !NdiSending || (++_previewFrameCounter % 4 == 0);
-            if (!_renderExit && readPreview && _previewUiBuffer is not null &&
-                _compositor.TryReadPreviewBgra(_previewBuffer, out _))
+            // 2) NDI — full-frame and zones share the same NdiOutputSender profile.
+            if (!_renderExit)
             {
-                lock (_renderLock)
+                if (NdiSending && _ndiOut is { IsActive: true })
                 {
-                    Buffer.BlockCopy(_previewBuffer, 0, _previewUiBuffer, 0, _previewBuffer.Length);
+                    lock (_gpu.ContextLock)
+                        _ndiOut.SendFrame(_compositor.CanvasTexture);
                 }
-                _previewDirty = true;
+                SendEnabledZoneStreams(_compositor.CanvasTexture);
+            }
+
+            // 3) Preview after output, capped at 30 Hz.
+            if (!_renderExit && wantPreview)
+            {
+                _lastPreviewEmitQpc = System.Diagnostics.Stopwatch.GetTimestamp();
+                lock (_gpu.ContextLock)
+                    _compositor.EmitPreview(ShowBackgroundInPreview, LidarEnabled ? blobFrame : null);
+                _previewEmitCounter++;
             }
 
             _frameCounter++;
@@ -1303,11 +1971,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             if (dt >= 1.0)
             {
                 _renderFps = _frameCounter / dt;
+                _previewFps = _previewEmitCounter / dt;
                 _frameCounter = 0;
+                _previewEmitCounter = 0;
                 _lastFpsTime = now;
-                // Status string is assembled on the UI thread (UiTick) to avoid NDI/WPF work here.
-                if (!CarouselBusy)
-                    _pendingStatus = "fps";
+                _pendingStatus = "fps";
             }
         }
         catch (Exception ex)
@@ -1325,18 +1993,26 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _renderExit = true;
         _timer.Stop();
         _ndiOut?.BeginShutdown();
+        foreach (var item in NdiZoneStreams)
+            item.Stream.BeginShutdown();
     }
 
     public void OnPreviewMouseDown(Point canvasPixel, bool startDrag)
     {
+        if (PlacingLidarSensor)
+        {
+            LidarSensorX = canvasPixel.X;
+            LidarSensorY = canvasPixel.Y;
+            PlacingLidarSensor = false;
+            SyncLidarServiceSettings(Zones.FirstOrDefault(z => z.Id.Equals("floor", StringComparison.OrdinalIgnoreCase)));
+            return;
+        }
+
         CompositionLayer? hit = null;
         foreach (var layer in Layers.OrderByDescending(l => l.ZIndex))
         {
-            if (!layer.IsEffectivelyVisible) continue;
-            var (bx, by, bw, bh) = layer.GetMapBounds();
-            if (bw <= 0 || bh <= 0) continue;
-            if (canvasPixel.X >= bx && canvasPixel.X <= bx + bw &&
-                canvasPixel.Y >= by && canvasPixel.Y <= by + bh)
+            if (!layer.IsLogicallyVisible) continue;
+            if (WallCarousel.LayerContainsMapPoint(layer, Zones, canvasPixel.X, canvasPixel.Y))
             {
                 hit = layer;
                 break;
@@ -1377,17 +2053,290 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     partial void OnOutputNameChanged(string value)
     {
-        if (_gpu is null || _pixelMap.CanvasWidth <= 0) return;
-        _ndiOut?.Dispose();
-        _ndiOut = new NdiOutputSender(_gpu, value);
+        RecreateNdiSender(value);
+    }
+
+    partial void OnNdiSendingChanged(bool value)
+    {
+        if (_gpu is null || _pixelMap.CanvasWidth <= 0 || _disposed || _suppressNdiStreamRecreate)
+            return;
+
+        if (!value)
+            StopFullFrameNdiSender();
+        else
+            EnsureFullFrameNdiSender();
+    }
+
+    public void CommitNdiAdapterFromUi(NdiAdapterChoice? choice)
+    {
+        if (!_ndiAdapterReady || choice is null)
+            return;
+
+        if (SelectedNdiAdapter is not null && SelectedNdiAdapter.Equals(choice))
+            return;
+
+        SelectedNdiAdapter = choice;
+    }
+
+    partial void OnSelectedNdiAdapterChanged(NdiAdapterChoice? value)
+    {
+        if (!_ndiAdapterReady || value is null)
+            return;
+
+        ApplyNdiAdapterToAllSenders(value);
+    }
+
+    private void ApplyNdiAdapterToAllSenders(NdiAdapterChoice value)
+    {
+        NdiAdapterBinding.Apply(value);
+        try { SaveSession(); } catch { /* persist NIC so next launch matches */ }
+        RecreateNdiSender(OutputName);
+        if (!NdiAdapterBinding.LastAccessManagerWriteOk)
+        {
+            StatusText = "NDI-Adapter: Config im Programmordner nicht geschrieben.";
+            return;
+        }
+
+        StatusText = value.IsAutomatic
+            ? "NDI-Config (Programm\\NDI): automatisch — alle Karten"
+            : $"NDI-Config (Programm\\NDI): {value.DisplayName}";
+    }
+
+    private void SelectNdiAdapter(string? id, string? ipv4, bool recreateSender)
+    {
+        _ndiAdapterReady = false;
+        NdiAdapters.Clear();
+        foreach (var adapter in NdiAdapterBinding.ListAdapters())
+            NdiAdapters.Add(adapter);
+
+        SelectedNdiAdapter = NdiAdapterBinding.Resolve(id, ipv4, NdiAdapters);
+        NdiAdapterBinding.Apply(SelectedNdiAdapter);
+        _ndiAdapterReady = true;
+
+        if (!NdiAdapterBinding.LastAccessManagerWriteOk)
+            StatusText = "NDI-Adapter: Config im Programmordner nicht geschrieben.";
+        else if (SelectedNdiAdapter.IsAutomatic)
+            StatusText = "NDI-Config (Programm\\NDI): automatisch — alle Karten";
+        else
+            StatusText = $"NDI-Config (Programm\\NDI): {SelectedNdiAdapter.DisplayName}";
+
+        if (recreateSender && _gpu is not null)
+            RecreateNdiSender(OutputName);
+    }
+
+    private void RecreateNdiSender(string name)
+    {
+        if (_gpu is null || _pixelMap.CanvasWidth <= 0)
+            return;
+
+        SyncNdiEncodeBudget();
+
+        if (NdiSending)
+            EnsureFullFrameNdiSender(name);
+        else
+            StopFullFrameNdiSender();
+
+        RecreateEnabledZoneStreams();
+    }
+
+    private void SyncNdiEncodeBudget()
+    {
+        long pixels = 0;
+        foreach (var item in NdiZoneStreams)
+        {
+            if (!item.Enabled)
+                continue;
+            pixels += (long)item.Stream.CropWidth * item.Stream.CropHeight;
+        }
+
+        if (pixels > 0)
+            NdiAdapterBinding.SetZoneBudgetPixels(pixels);
+    }
+
+    private void EnsureFullFrameNdiSender(string? name = null)
+    {
+        if (_gpu is null || _pixelMap.CanvasWidth <= 0)
+            return;
+
+        var ndiName = name ?? OutputName;
+        StopFullFrameNdiSender();
         try
         {
+            _ndiOut = NdiOutputSender.CreateFullFrame(
+                _gpu, ndiName, _pixelMap.CanvasWidth, _pixelMap.CanvasHeight);
             _ndiOut.Initialize(_pixelMap.CanvasWidth, _pixelMap.CanvasHeight);
         }
         catch (Exception ex)
         {
+            StopFullFrameNdiSender();
             NdiSending = false;
             StatusText = $"NDI init failed: {ex.Message}";
+        }
+    }
+
+    private void StopFullFrameNdiSender()
+    {
+        _ndiOut?.BeginShutdown();
+        _ndiOut?.Dispose();
+        _ndiOut = null;
+    }
+
+    private void RestartNdiStack()
+    {
+        StopAllZoneStreams();
+        StopFullFrameNdiSender();
+        _ndiCatalog?.Dispose();
+        _ndiCatalog = null;
+
+        try
+        {
+            if (!NdiBootstrap.Reinitialize())
+                throw new InvalidOperationException("NDI library failed to initialize.");
+
+            if (_gpu is null || _pixelMap.CanvasWidth <= 0)
+                return;
+
+            _hub.RestartNdiSources();
+            SyncNdiEncodeBudget();
+            if (NdiSending)
+                EnsureFullFrameNdiSender();
+            RecreateEnabledZoneStreams();
+            try { _ndiCatalog = new NdiSourceCatalog(); }
+            catch { /* finder optional */ }
+            RefreshSources();
+        }
+        catch (Exception ex)
+        {
+            NdiSending = false;
+            StopFullFrameNdiSender();
+            StopAllZoneStreams();
+            StatusText = $"NDI init failed: {ex.Message}";
+        }
+    }
+
+    private void InitNdiZoneStreams(IReadOnlyList<string>? enabledIds)
+    {
+        if (_gpu is null)
+            return;
+
+        foreach (var item in NdiZoneStreams)
+            item.Stream.Dispose();
+        NdiZoneStreams.Clear();
+
+        var enabled = new HashSet<string>(
+            enabledIds ?? Array.Empty<string>(),
+            StringComparer.OrdinalIgnoreCase);
+
+        _suppressNdiStreamRecreate = true;
+        try
+        {
+            foreach (var (zoneId, suffix, displayName) in NdiZoneStream.Catalog)
+            {
+                var stream = new NdiZoneStream(_gpu, zoneId, suffix, displayName);
+                var zone = Zones.FirstOrDefault(z => z.Id.Equals(zoneId, StringComparison.OrdinalIgnoreCase));
+                if (zone is null || !stream.TryBindZone(zone))
+                    continue;
+
+                var item = new NdiZoneStreamItem(stream, OnNdiZoneEnabledChanged);
+                item.RefreshLabel();
+                NdiZoneStreams.Add(item);
+                if (enabled.Contains(zoneId))
+                    item.Enabled = true;
+            }
+        }
+        finally
+        {
+            _suppressNdiStreamRecreate = false;
+        }
+    }
+
+    private void ApplyEnabledNdiZones(IReadOnlyList<string>? enabledIds)
+    {
+        if (NdiZoneStreams.Count == 0)
+            return;
+
+        var enabled = new HashSet<string>(
+            enabledIds ?? Array.Empty<string>(),
+            StringComparer.OrdinalIgnoreCase);
+        _suppressNdiStreamRecreate = true;
+        try
+        {
+            foreach (var item in NdiZoneStreams)
+                item.Enabled = enabled.Contains(item.ZoneId);
+        }
+        finally
+        {
+            _suppressNdiStreamRecreate = false;
+        }
+
+        RecreateEnabledZoneStreams();
+    }
+
+    private void OnNdiZoneEnabledChanged(NdiZoneStreamItem item, bool enabled)
+    {
+        if (_gpu is null || _disposed || _suppressNdiStreamRecreate)
+            return;
+
+        RecreateEnabledZoneStreams();
+    }
+
+    private void RecreateEnabledZoneStreams()
+    {
+        if (_gpu is null)
+            return;
+
+        SyncNdiEncodeBudget();
+
+        lock (_gpu.ContextLock)
+        {
+            foreach (var item in NdiZoneStreams)
+            {
+                item.Stream.Stop();
+                if (!item.Enabled)
+                    continue;
+
+                try
+                {
+                    item.Stream.EnsureStarted(OutputName);
+                }
+                catch (Exception ex)
+                {
+                    item.Enabled = false;
+                    StatusText = $"Zonen-NDI {item.Stream.DisplayName}: {ex.Message}";
+                }
+            }
+        }
+    }
+
+    private void StopAllZoneStreams()
+    {
+        if (_gpu is null)
+        {
+            foreach (var item in NdiZoneStreams)
+                item.Stream.Stop();
+            return;
+        }
+
+        lock (_gpu.ContextLock)
+        {
+            foreach (var item in NdiZoneStreams)
+                item.Stream.Stop();
+        }
+    }
+
+    private void SendEnabledZoneStreams(ID3D11Texture2D canvas)
+    {
+        if (_gpu is null || NdiZoneStreams.Count == 0)
+            return;
+
+        lock (_gpu.ContextLock)
+        {
+            foreach (var item in NdiZoneStreams)
+            {
+                if (!item.Enabled || !item.Stream.IsActive)
+                    continue;
+                item.Stream.SendFromCanvas(canvas, CanvasWidth, CanvasHeight);
+            }
         }
     }
 
@@ -1399,6 +2348,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
         RequestShutdown();
         _renderThread?.Join(TimeSpan.FromSeconds(5));
+        if (_compositor is not null)
+            _compositor.PreviewFrameReady -= OnPreviewFrameReady;
+        _lidar?.Dispose();
+        foreach (var item in NdiZoneStreams)
+            item.Stream.Dispose();
+        NdiZoneStreams.Clear();
         _ndiOut?.Dispose();
         _compositor?.Dispose();
         _hub.Dispose();
@@ -1406,6 +2361,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _spoutCatalog?.Dispose();
         _gpu?.Dispose();
     }
+
+    [DllImport("winmm.dll")]
+    private static extern uint timeBeginPeriod(uint period);
+
+    [DllImport("winmm.dll")]
+    private static extern uint timeEndPeriod(uint period);
 }
 
 public sealed class GroupChoice

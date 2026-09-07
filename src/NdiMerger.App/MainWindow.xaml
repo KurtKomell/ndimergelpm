@@ -69,14 +69,31 @@
   </Window.DataContext>
 
   <DockPanel>
-    <StatusBar DockPanel.Dock="Bottom">
-      <StatusBarItem>
-        <TextBlock Text="{Binding StatusText}" Foreground="White" />
-      </StatusBarItem>
-      <StatusBarItem HorizontalAlignment="Right">
-        <TextBlock Text="{Binding CanvasInfo}" Margin="12,0" Foreground="White" />
-      </StatusBarItem>
-    </StatusBar>
+    <Border DockPanel.Dock="Bottom"
+            Background="#1E1E1E"
+            BorderBrush="#333"
+            BorderThickness="0,1,0,0"
+            Padding="8,4">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <TextBlock Grid.Column="0"
+                   Text="{Binding StatusText}"
+                   Foreground="White"
+                   FontFamily="Consolas"
+                   FontSize="11"
+                   TextWrapping="Wrap"
+                   VerticalAlignment="Center" />
+        <TextBlock Grid.Column="1"
+                   Text="{Binding CanvasInfo}"
+                   Margin="12,0,0,0"
+                   Foreground="#AAA"
+                   FontSize="11"
+                   VerticalAlignment="Top" />
+      </Grid>
+    </Border>
 
     <Grid Margin="8">
       <Grid.ColumnDefinitions>
@@ -108,7 +125,7 @@
               MouseLeave="Preview_MouseLeftButtonUp">
           <Image Source="{Binding PreviewImage}"
                  Stretch="Uniform"
-                 RenderOptions.BitmapScalingMode="HighQuality"
+                 RenderOptions.BitmapScalingMode="LowQuality"
                  Name="PreviewImageControl" />
           <Canvas Name="OverlayCanvas" IsHitTestVisible="False" />
           <TextBlock Text="{Binding Fps, StringFormat={}{0:0.0} FPS}"
@@ -281,6 +298,102 @@
                          VerticalAlignment="Center" Foreground="White" />
             </Grid>
 
+            <TextBlock Text="LiDAR Floor Blobs" FontWeight="SemiBold" Margin="0,0,0,4" Foreground="White" />
+            <CheckBox Content="LiDAR-Tracking aktiv"
+                      IsChecked="{Binding LidarEnabled}"
+                      Margin="0,0,0,6" />
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+              <ComboBox ItemsSource="{Binding ComPorts}"
+                        SelectedItem="{Binding SelectedComPort}"
+                        MinWidth="90"
+                        Margin="0,0,6,0" />
+              <Button Content="Ports" Command="{Binding RefreshComPortsCommand}" Margin="0,0,6,0" />
+              <Button Content="Connect" Command="{Binding ConnectLidarCommand}" Margin="0,0,6,0" />
+              <Button Content="Stop" Command="{Binding DisconnectLidarCommand}" />
+            </StackPanel>
+            <TextBlock Text="{Binding LidarStatusText}" FontSize="11" Foreground="#AAA" Margin="0,0,0,6" TextWrapping="Wrap" />
+            <CheckBox Content="LiDAR-Punkte im Preview"
+                      IsChecked="{Binding LidarShowDebugPoints}"
+                      Margin="0,0,0,6" />
+            <Button Content="Sensor im Preview setzen"
+                    Command="{Binding TogglePlaceLidarSensorCommand}"
+                    Margin="0,0,0,6" />
+            <Grid Margin="0,0,0,6">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="86" />
+                <ColumnDefinition Width="*" />
+              </Grid.ColumnDefinitions>
+              <Grid.RowDefinitions>
+                <RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition />
+              </Grid.RowDefinitions>
+              <TextBlock Grid.Row="0" Text="Sensor X" VerticalAlignment="Center" />
+              <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding LidarSensorX, UpdateSourceTrigger=LostFocus}" Margin="0,2" />
+              <TextBlock Grid.Row="1" Text="Sensor Y" VerticalAlignment="Center" />
+              <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding LidarSensorY, UpdateSourceTrigger=LostFocus}" Margin="0,2" />
+              <TextBlock Grid.Row="2" Text="Rotation" VerticalAlignment="Center" />
+              <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding LidarRotation, UpdateSourceTrigger=LostFocus}" Margin="0,2" />
+              <TextBlock Grid.Row="3" Text="Breite m" VerticalAlignment="Center"
+                         ToolTip="Reale Bodenbreite entlang der Canvas-X-Achse" />
+              <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding LidarFloorWidthM, UpdateSourceTrigger=LostFocus}" Margin="0,2" />
+              <TextBlock Grid.Row="4" Text="Länge m" VerticalAlignment="Center"
+                         ToolTip="Reale Bodenlänge entlang der Canvas-Y-Achse (oft die längere Seite)" />
+              <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding LidarFloorLengthM, UpdateSourceTrigger=LostFocus}" Margin="0,2" />
+              <TextBlock Grid.Row="5" Text="px / Meter" VerticalAlignment="Center" />
+              <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding LidarPixelsPerMeter, UpdateSourceTrigger=LostFocus}" Margin="0,2" />
+            </Grid>
+            <CheckBox Content="X spiegeln"
+                      IsChecked="{Binding LidarMirrorX}"
+                      Margin="0,0,0,6" />
+            <Button Content="Hintergrund neu lernen"
+                    Command="{Binding ResetLidarBackgroundCommand}"
+                    Margin="0,0,0,8" />
+
+            <Grid Margin="0,0,0,12">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="86" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="44" />
+              </Grid.ColumnDefinitions>
+              <Grid.RowDefinitions>
+                <RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition />
+              </Grid.RowDefinitions>
+
+              <TextBlock Grid.Row="0" Text="Blase m" VerticalAlignment="Center" />
+              <Slider Grid.Row="0" Grid.Column="1" Minimum="0.2" Maximum="1.5" TickFrequency="0.05"
+                      Value="{Binding LidarBlobRadiusM}" VerticalAlignment="Center" Margin="4,2" />
+              <TextBlock Grid.Row="0" Grid.Column="2" Text="{Binding LidarBlobRadiusM, StringFormat={}{0:0.00}}" VerticalAlignment="Center" />
+
+              <TextBlock Grid.Row="1" Text="Deckkraft" VerticalAlignment="Center" />
+              <Slider Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="1" TickFrequency="0.01"
+                      Value="{Binding LidarBlobOpacity}" VerticalAlignment="Center" Margin="4,2" />
+              <TextBlock Grid.Row="1" Grid.Column="2" Text="{Binding LidarBlobOpacity, StringFormat={}{0:0.00}}" VerticalAlignment="Center" />
+
+              <TextBlock Grid.Row="2" Text="Weichheit" VerticalAlignment="Center" />
+              <Slider Grid.Row="2" Grid.Column="1" Minimum="0.05" Maximum="0.95" TickFrequency="0.01"
+                      Value="{Binding LidarBlobSoftness}" VerticalAlignment="Center" Margin="4,2" />
+              <TextBlock Grid.Row="2" Grid.Column="2" Text="{Binding LidarBlobSoftness, StringFormat={}{0:0.00}}" VerticalAlignment="Center" />
+
+              <TextBlock Grid.Row="3" Text="Spur s" VerticalAlignment="Center" />
+              <Slider Grid.Row="3" Grid.Column="1" Minimum="0" Maximum="4" TickFrequency="0.1"
+                      Value="{Binding LidarTrailLength}" VerticalAlignment="Center" Margin="4,2" />
+              <TextBlock Grid.Row="3" Grid.Column="2" Text="{Binding LidarTrailLength, StringFormat={}{0:0.0}}" VerticalAlignment="Center" />
+
+              <TextBlock Grid.Row="4" Text="Spur %" VerticalAlignment="Center" />
+              <Slider Grid.Row="4" Grid.Column="1" Minimum="0" Maximum="1" TickFrequency="0.01"
+                      Value="{Binding LidarTrailStrength}" VerticalAlignment="Center" Margin="4,2" />
+              <TextBlock Grid.Row="4" Grid.Column="2" Text="{Binding LidarTrailStrength, StringFormat={}{0:0.00}}" VerticalAlignment="Center" />
+
+              <TextBlock Grid.Row="5" Text="Bewegung mm" VerticalAlignment="Center" />
+              <Slider Grid.Row="5" Grid.Column="1" Minimum="0" Maximum="1200" TickFrequency="25"
+                      Value="{Binding LidarMinMovementMm}" VerticalAlignment="Center" Margin="4,2" />
+              <TextBlock Grid.Row="5" Grid.Column="2" Text="{Binding LidarMinMovementMm, StringFormat={}{0:0}}" VerticalAlignment="Center" />
+
+              <TextBlock Grid.Row="6" Text="Breite mm" VerticalAlignment="Center" />
+              <Slider Grid.Row="6" Grid.Column="1" Minimum="200" Maximum="1500" TickFrequency="25"
+                      Value="{Binding LidarMaxPersonWidthMm}" VerticalAlignment="Center" Margin="4,2" />
+              <TextBlock Grid.Row="6" Grid.Column="2" Text="{Binding LidarMaxPersonWidthMm, StringFormat={}{0:0}}" VerticalAlignment="Center" />
+            </Grid>
+
             <TextBlock Text="Layer properties" FontWeight="SemiBold" Margin="0,0,0,4" Foreground="White" />
             <Grid Margin="0,0,0,8">
               <Grid.ColumnDefinitions>
@@ -289,7 +402,7 @@
               </Grid.ColumnDefinitions>
               <Grid.RowDefinitions>
                 <RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition />
-                <RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition />
+                <RowDefinition /><RowDefinition /><RowDefinition />
               </Grid.RowDefinitions>
 
               <TextBlock Grid.Row="0" Text="X" VerticalAlignment="Center" Foreground="White" />
@@ -300,21 +413,127 @@
               <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding SelectedLayer.Scale, UpdateSourceTrigger=LostFocus}" Margin="0,2" />
               <TextBlock Grid.Row="3" Text="Rotation" VerticalAlignment="Center" Foreground="White" />
               <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding SelectedLayer.RotationDegrees, UpdateSourceTrigger=LostFocus}" Margin="0,2" />
-              <TextBlock Grid.Row="4" Text="Opacity" VerticalAlignment="Center" Foreground="White" />
-              <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding SelectedLayer.Opacity, UpdateSourceTrigger=LostFocus}" Margin="0,2" />
-              <TextBlock Grid.Row="5" Text="Native W" VerticalAlignment="Center" Foreground="White" />
-              <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding SelectedLayer.NativeWidth}" Margin="0,2" Foreground="White" />
-              <TextBlock Grid.Row="6" Text="Native H" VerticalAlignment="Center" Foreground="White" />
-              <TextBlock Grid.Row="6" Grid.Column="1" Text="{Binding SelectedLayer.NativeHeight}" Margin="0,2" Foreground="White" />
-              <TextBlock Grid.Row="7" Text="Gruppe" VerticalAlignment="Center" Foreground="White" />
-              <ComboBox Grid.Row="7" Grid.Column="1"
+              <TextBlock Grid.Row="4" Text="Native W" VerticalAlignment="Center" Foreground="White" />
+              <TextBlock Grid.Row="4" Grid.Column="1" Text="{Binding SelectedLayer.NativeWidth}" Margin="0,2" Foreground="White" />
+              <TextBlock Grid.Row="5" Text="Native H" VerticalAlignment="Center" Foreground="White" />
+              <TextBlock Grid.Row="5" Grid.Column="1" Text="{Binding SelectedLayer.NativeHeight}" Margin="0,2" Foreground="White" />
+              <TextBlock Grid.Row="6" Text="Gruppe" VerticalAlignment="Center" Foreground="White" />
+              <ComboBox Grid.Row="6" Grid.Column="1"
                         ItemsSource="{Binding GroupChoices}"
                         SelectedItem="{Binding SelectedGroupChoice}"
                         DisplayMemberPath="Name"
                         Margin="0,2" />
             </Grid>
 
-            <CheckBox Content="Visible" IsChecked="{Binding SelectedLayer.Visible}" Margin="0,0,0,8" />
+            <TextBlock Text="Layer-Zuschnitt" FontWeight="SemiBold" Margin="0,0,0,4" Foreground="White"
+                       ToolTip="Zuschneiden gilt nur für diesen Layer, nicht für die gemeinsame Quelle." />
+            <Grid Margin="0,0,0,8" IsEnabled="{Binding HasSelectedLayer}">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="70" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="48" />
+              </Grid.ColumnDefinitions>
+              <Grid.RowDefinitions>
+                <RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition /><RowDefinition />
+              </Grid.RowDefinitions>
+              <TextBlock Grid.Row="0" Text="Crop X" VerticalAlignment="Center" Foreground="White" />
+              <Slider Grid.Row="0" Grid.Column="1"
+                      Minimum="0"
+                      Maximum="{Binding SelectedLayer.CropXMax}"
+                      TickFrequency="1"
+                      IsMoveToPointEnabled="True"
+                      Value="{Binding SelectedLayer.CropX, Mode=TwoWay}"
+                      VerticalAlignment="Center" Margin="4,2" />
+              <TextBlock Grid.Row="0" Grid.Column="2" Text="{Binding SelectedLayer.CropX}" VerticalAlignment="Center" />
+              <TextBlock Grid.Row="1" Text="Crop Y" VerticalAlignment="Center" Foreground="White" />
+              <Slider Grid.Row="1" Grid.Column="1"
+                      Minimum="0"
+                      Maximum="{Binding SelectedLayer.CropYMax}"
+                      TickFrequency="1"
+                      IsMoveToPointEnabled="True"
+                      Value="{Binding SelectedLayer.CropY, Mode=TwoWay}"
+                      VerticalAlignment="Center" Margin="4,2" />
+              <TextBlock Grid.Row="1" Grid.Column="2" Text="{Binding SelectedLayer.CropY}" VerticalAlignment="Center" />
+              <TextBlock Grid.Row="2" Text="Crop W" VerticalAlignment="Center" Foreground="White" />
+              <Slider Grid.Row="2" Grid.Column="1"
+                      Minimum="1"
+                      Maximum="{Binding SelectedLayer.CropWMax}"
+                      TickFrequency="1"
+                      IsMoveToPointEnabled="True"
+                      Value="{Binding SelectedLayer.CropW, Mode=TwoWay}"
+                      VerticalAlignment="Center" Margin="4,2" />
+              <TextBlock Grid.Row="2" Grid.Column="2" Text="{Binding SelectedLayer.CropW}" VerticalAlignment="Center" />
+              <TextBlock Grid.Row="3" Text="Crop H" VerticalAlignment="Center" Foreground="White" />
+              <Slider Grid.Row="3" Grid.Column="1"
+                      Minimum="1"
+                      Maximum="{Binding SelectedLayer.CropHMax}"
+                      TickFrequency="1"
+                      IsMoveToPointEnabled="True"
+                      Value="{Binding SelectedLayer.CropH, Mode=TwoWay}"
+                      VerticalAlignment="Center" Margin="4,2" />
+              <TextBlock Grid.Row="3" Grid.Column="2" Text="{Binding SelectedLayer.CropH}" VerticalAlignment="Center" />
+              <Button Grid.Row="4" Grid.Column="1" Content="Zuschnitt zurücksetzen"
+                      Command="{Binding ResetSelectedLayerCropCommand}"
+                      Margin="0,4,0,0" HorizontalAlignment="Left" />
+            </Grid>
+
+            <TextBlock Text="Einblenden" FontWeight="SemiBold" Margin="0,0,0,4" Foreground="White" />
+            <Grid Margin="0,0,0,8">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="70" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="44" />
+              </Grid.ColumnDefinitions>
+              <Grid.RowDefinitions>
+                <RowDefinition /><RowDefinition /><RowDefinition />
+              </Grid.RowDefinitions>
+
+              <TextBlock Grid.Row="0" Text="Dauer s" VerticalAlignment="Center" Foreground="White"
+                         ToolTip="Fade-Dauer in Sekunden (0 = sofort). Gilt für Visible und Layer/Gruppe-Regler." />
+              <Slider Grid.Row="0" Grid.Column="1"
+                      Minimum="0" Maximum="10" TickFrequency="0.1"
+                      IsSnapToTickEnabled="False"
+                      Value="{Binding FadeDurationSeconds, Mode=TwoWay}"
+                      VerticalAlignment="Center" Margin="4,2" />
+              <TextBlock Grid.Row="0" Grid.Column="2"
+                         Text="{Binding FadeDurationSeconds, StringFormat={}{0:0.0}s}"
+                         VerticalAlignment="Center" Foreground="White" />
+
+              <TextBlock Grid.Row="1" Text="Layer" VerticalAlignment="Center" Foreground="White"
+                         ToolTip="Ziel-Opacity; wechselt über die Dauer" />
+              <Slider Grid.Row="1" Grid.Column="1"
+                      Minimum="0" Maximum="1" TickFrequency="0.01"
+                      IsMoveToPointEnabled="True"
+                      Value="{Binding SelectedLayer.Opacity, Mode=TwoWay}"
+                      VerticalAlignment="Center" Margin="4,2"
+                      IsEnabled="{Binding HasSelectedLayer}" />
+              <TextBlock Grid.Row="1" Grid.Column="2"
+                         Text="{Binding SelectedLayer.Opacity, StringFormat={}{0:0.00}}"
+                         VerticalAlignment="Center" Foreground="White" />
+
+              <TextBlock Grid.Row="2" Text="Gruppe" VerticalAlignment="Center" Foreground="White"
+                         ToolTip="Gruppen-Opacity; wechselt über die Dauer" />
+              <Slider Grid.Row="2" Grid.Column="1"
+                      Minimum="0" Maximum="1" TickFrequency="0.01"
+                      IsMoveToPointEnabled="True"
+                      Value="{Binding SelectedGroup.Opacity, Mode=TwoWay}"
+                      VerticalAlignment="Center" Margin="4,2"
+                      IsEnabled="{Binding HasSelectedGroup}" />
+              <TextBlock Grid.Row="2" Grid.Column="2"
+                         Text="{Binding SelectedGroup.Opacity, StringFormat={}{0:0.00}}"
+                         VerticalAlignment="Center" Foreground="White" />
+            </Grid>
+
+            <TextBlock Margin="0,0,0,8" FontSize="11" Foreground="#AAA"
+                       Text="Tipp: Dauer setzen, dann Visible / Layer / Gruppe ändern — Fade läuft über die Dauer." />
+
+            <CheckBox Content="Visible" IsChecked="{Binding SelectedLayer.Visible}"
+                      IsEnabled="{Binding HasSelectedLayer}" Margin="0,0,0,4" />
+            <CheckBox Content="Gruppe Visible"
+                      IsChecked="{Binding SelectedGroup.Visible}"
+                      IsEnabled="{Binding HasSelectedGroup}"
+                      Margin="0,0,0,8"
+                      ToolTip="Hide/show whole group (fades with Dauer)" />
             <CheckBox Content="Black Key"
                       IsChecked="{Binding SelectedLayer.BlackKeyEnabled}"
                       Margin="0,0,0,4" />
@@ -338,7 +557,53 @@
             <Separator Margin="0,0,0,8" />
             <TextBlock Text="NDI Output" FontWeight="SemiBold" Margin="0,0,0,4" Foreground="White" />
             <TextBox Text="{Binding OutputName, UpdateSourceTrigger=LostFocus}" Margin="0,0,0,4" />
-            <CheckBox Content="Send NDI (8038×5798)" IsChecked="{Binding NdiSending}" Margin="0,0,0,12" />
+            <TextBlock Text="Netzwerkkarte (alle NDI-Ausgänge)"
+                       FontSize="11" Foreground="#AAA" Margin="0,0,0,2" />
+            <Grid Margin="0,0,0,8">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <ComboBox x:Name="NdiAdapterCombo"
+                        ItemsSource="{Binding NdiAdapters}"
+                        SelectedItem="{Binding SelectedNdiAdapter}"
+                        DisplayMemberPath="DisplayName"
+                        SelectionChanged="NdiAdapterCombo_SelectionChanged"
+                        ToolTip="Schreibt ndi-config.v1.json nach Programm\NDI\ (Access-Manager-Format). Kein ProgramData, kein UAC." />
+              <Button Grid.Column="1"
+                      Content="Verbinden"
+                      Command="{Binding BindNdiAdapterCommand}"
+                      Margin="6,0,0,0"
+                      ToolTip="Schreibt die gewählte Karte in Programm\NDI\ndi-config.v1.json und startet alle Sender neu." />
+              <Button Grid.Column="2"
+                      Content="Aktualisieren"
+                      Command="{Binding RefreshNdiAdaptersCommand}"
+                      Margin="6,0,0,0" />
+            </Grid>
+            <TextBlock Text="{Binding NdiSendingNicText}"
+                       Foreground="Red"
+                       FontWeight="SemiBold"
+                       FontSize="12"
+                       Margin="0,0,0,8"
+                       TextWrapping="Wrap" />
+            <CheckBox Content="Full-Frame NDI (8038×5798 UYVY)"
+                      IsChecked="{Binding NdiSending}"
+                      Margin="0,0,0,4"
+                      ToolTip="Aus = Full-Frame wird nicht aufgeworfen; Zonen-NDI unabhängig" />
+
+            <TextBlock Text="Zonen-NDI" FontWeight="SemiBold" Margin="0,4,0,4" Foreground="White" />
+            <TextBlock Text="Crop + Ausrichtung: Floor-Kante unten (Floor: Nord unten). Gleiche Ethernet-Karte wie oben."
+                       FontSize="11" Foreground="#AAA" Margin="0,0,0,4" TextWrapping="Wrap" />
+            <ItemsControl ItemsSource="{Binding NdiZoneStreams}" Margin="0,0,0,12">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <CheckBox Content="{Binding Label}"
+                            IsChecked="{Binding Enabled, Mode=TwoWay}"
+                            Margin="0,0,0,2" />
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
 
             <TextBlock Text="Pixelmap-Overlay" FontWeight="SemiBold" Margin="0,0,0,4" Foreground="White" />
             <CheckBox Content="An (halbtransparent über allem)"

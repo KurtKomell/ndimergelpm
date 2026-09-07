@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
@@ -21,6 +21,7 @@
     <ProjectReference Include="..\NdiMerger.Core\NdiMerger.Core.csproj" />
     <ProjectReference Include="..\NdiMerger.Sources\NdiMerger.Sources.csproj" />
     <ProjectReference Include="..\NdiMerger.Output\NdiMerger.Output.csproj" />
+    <ProjectReference Include="..\NdiMerger.Tracking\NdiMerger.Tracking.csproj" />
   </ItemGroup>
 
   <!-- Safety net if WebView2.targets still flows transitively. -->
@@ -31,6 +32,7 @@
   </Target>
 
   <ItemGroup>
+    <None Include="NDI\ndi-config.v1.json" Link="NDI\ndi-config.v1.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\assets\**\*" Link="assets\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\libs\Processing.NDI.Lib.x64.dll" Link="Processing.NDI.Lib.x64.dll" CopyToOutputDirectory="PreserveNewest" />
     <!-- WebView2Loader must sit next to the EXE; the package targets would copy it, but we keep those off to avoid WPF. -->

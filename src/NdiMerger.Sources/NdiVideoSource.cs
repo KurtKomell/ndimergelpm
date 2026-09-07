@@ -16,6 +16,8 @@ public static class NdiBootstrap
         if (Interlocked.Exchange(ref _init, 1) == 1)
             return true;
 
+        NdiAdapterBinding.EnsureProcessConfigDir();
+
         try
         {
             if (!NDIlib.initialize())
@@ -30,6 +32,22 @@ public static class NdiBootstrap
             _init = 0;
             return false;
         }
+    }
+
+    public static bool Reinitialize()
+    {
+        try
+        {
+            if (Interlocked.CompareExchange(ref _init, 0, 1) == 1)
+                NDIlib.destroy();
+        }
+        catch
+        {
+            Interlocked.Exchange(ref _init, 0);
+        }
+
+        NdiAdapterBinding.EnsureProcessConfigDir();
+        return EnsureInitialized();
     }
 }
 
@@ -82,7 +100,12 @@ public sealed class NdiVideoSource : BgraUploadSource
         base.Start(gpu);
         NdiBootstrap.EnsureInitialized();
         _exit = false;
-        _thread = new Thread(ReceiveLoop) { IsBackground = true, Name = $"NDI-{_sourceName}" };
+        _thread = new Thread(ReceiveLoop)
+        {
+            IsBackground = true,
+            Name = $"NDI-{_sourceName}",
+            Priority = ThreadPriority.Highest
+        };
         _thread.Start();
     }
 
@@ -115,7 +138,7 @@ public sealed class NdiVideoSource : BgraUploadSource
                 var video = new NDIlib.video_frame_v2_t();
                 var audio = new NDIlib.audio_frame_v2_t();
                 var meta = new NDIlib.metadata_frame_t();
-                var type = NDIlib.recv_capture_v2(_recv, ref video, ref audio, ref meta, 500);
+                var type = NDIlib.recv_capture_v2(_recv, ref video, ref audio, ref meta, 50);
 
                 switch (type)
                 {

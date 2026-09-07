@@ -55,12 +55,35 @@ public sealed class WallSimultaneousCycle
 }
 
 /// <summary>
+/// One unwrapped LED slice for the West ribbon (West 1–3).
+/// </summary>
+public readonly struct WallRibbonDraw
+{
+    public float X { get; init; }
+    public float Y { get; init; }
+    public float Width { get; init; }
+    public float Height { get; init; }
+    public float RotationDegrees { get; init; }
+    public float U0 { get; init; }
+    public float V0 { get; init; }
+    public float U1 { get; init; }
+    public float V1 { get; init; }
+}
+
+/// <summary>
 /// Synchronized conveyor for West (3 panels), Ost, and Sud walls.
+/// Stage is not part of the carousel.
 /// </summary>
 public static class WallCarousel
 {
     public const string WestPersistZoneId = "wall_west_1";
     public const string MovingLayerMarker = "\u200B⟶";
+
+    private readonly struct WestRibbonPanel
+    {
+        public float RibbonX { get; init; }
+        public float RibbonWidth { get; init; }
+    }
 
     private static readonly string[] WestZoneIds =
     [
@@ -77,6 +100,11 @@ public static class WallCarousel
 
     public static bool IsMovingCopy(CompositionLayer layer) =>
         layer.Name.Contains(MovingLayerMarker, StringComparison.Ordinal);
+
+    public static bool IsCarouselSource(CompositionLayer layer) =>
+        !IsMovingCopy(layer) &&
+        layer.SourceKind != SourceKind.Browser &&
+        layer.SourceKind != SourceKind.Solid;
 
     public static WallGroup? ResolveGroup(string? zoneId)
     {
@@ -124,25 +152,21 @@ public static class WallCarousel
 
     public static ZoneDefinition BuildCombinedWest(IReadOnlyList<ZoneDefinition> zones)
     {
-        var panels = WestZoneIds
-            .Select(id => RequireZone(zones, id))
-            .ToList();
+        if (!TryGetWestRibbon(zones, out var panels, out float ribbonY, out float ribbonH))
+            throw new InvalidOperationException("West wall zones not found in pixelmap.");
 
-        float minX = panels.Min(z => z.X);
-        float minY = panels.Min(z => z.Y);
-        float maxX = panels.Max(z => z.X + z.Width);
-        float maxY = panels.Max(z => z.Y + z.Height);
-
+        float x0 = panels[0].RibbonX;
+        float x1 = panels[^1].RibbonX + panels[^1].RibbonWidth;
         return new ZoneDefinition
         {
             Id = WestPersistZoneId,
             Name = "Wall West",
-            X = minX,
-            Y = minY,
-            Width = maxX - minX,
-            Height = maxY - minY,
-            ContentWidth = maxX - minX,
-            ContentHeight = maxY - minY,
+            X = x0,
+            Y = ribbonY,
+            Width = x1 - x0,
+            Height = ribbonH,
+            ContentWidth = x1 - x0,
+            ContentHeight = ribbonH,
             RotationDegrees = 0
         };
     }
@@ -151,20 +175,190 @@ public static class WallCarousel
     {
         WallGroup.West => 0f,
         WallGroup.Ost => 180f,
-        WallGroup.Sud => 90f,
+        WallGroup.Sud => 270f,
         _ => 0f
     };
+
+    public static bool TryBuildRibbonDraws(
+        CompositionLayer layer,
+        IReadOnlyList<ZoneDefinition> zones,
+        List<WallRibbonDraw> dest)
+    {
+        dest.Clear();
+        if (!IsWestRibbonCandidate(layer, zones))
+            return false;
+        if (!TryGetWestRibbon(zones, out var panels, out float ribbonY, out float ribbonH))
+            return false;
+
+        var size = layer.GetDrawSize();
+        if (size.X < 2f || size.Y < 2f)
+            return false;
+
+        float lx0 = layer.X;
+        float ly0 = layer.Y;
+        float lx1 = layer.X + size.X;
+        float ly1 = layer.Y + size.Y;
+
+        foreach (var panel in panels)
+        {
+            float ox0 = MathF.Max(lx0, panel.RibbonX);
+            float ox1 = MathF.Min(lx1, panel.RibbonX + panel.RibbonWidth);
+            float oy0 = MathF.Max(ly0, ribbonY);
+            float oy1 = MathF.Min(ly1, ribbonY + ribbonH);
+            if (ox1 - ox0 < 1f || oy1 - oy0 < 1f)
+                continue;
+
+            float u0 = (ox0 - lx0) / size.X;
+            float u1 = (ox1 - lx0) / size.X;
+            float v0 = (oy0 - ly0) / size.Y;
+            float v1 = (oy1 - ly0) / size.Y;
+            var uv0 = layer.MapCropUv(u0, v0);
+            var uv1 = layer.MapCropUv(u1, v1);
+
+            dest.Add(new WallRibbonDraw
+            {
+                X = ox0,
+                Y = oy0,
+                Width = ox1 - ox0,
+                Height = oy1 - oy0,
+                RotationDegrees = 0f,
+                U0 = uv0.X,
+                V0 = uv0.Y,
+                U1 = uv1.X,
+                V1 = uv1.Y
+            });
+        }
+
+        return dest.Count > 0;
+    }
+
+    public static IReadOnlyList<(float X, float Y, float W, float H)> GetRibbonOverlayRects(
+        CompositionLayer layer,
+        IReadOnlyList<ZoneDefinition> zones)
+    {
+        var draws = new List<WallRibbonDraw>();
+        if (!TryBuildRibbonDraws(layer, zones, draws))
+            return [];
+
+        var rects = new List<(float X, float Y, float W, float H)>(draws.Count);
+        foreach (var draw in draws)
+        {
+            float rot = ((draw.RotationDegrees % 360f) + 360f) % 360f;
+            bool swap = MathF.Abs(rot - 90f) < 1f || MathF.Abs(rot - 270f) < 1f;
+            float bw = swap ? draw.Height : draw.Width;
+            float bh = swap ? draw.Width : draw.Height;
+            float cx = draw.X + draw.Width * 0.5f;
+            float cy = draw.Y + draw.Height * 0.5f;
+            rects.Add((cx - bw * 0.5f, cy - bh * 0.5f, bw, bh));
+        }
+
+        return rects;
+    }
+
+    public static bool LayerContainsMapPoint(
+        CompositionLayer layer,
+        IReadOnlyList<ZoneDefinition> zones,
+        double mapX,
+        double mapY)
+    {
+        var rects = GetRibbonOverlayRects(layer, zones);
+        if (rects.Count > 0)
+        {
+            foreach (var (x, y, w, h) in rects)
+            {
+                if (mapX >= x && mapX <= x + w && mapY >= y && mapY <= y + h)
+                    return true;
+            }
+
+            return false;
+        }
+
+        var (bx, by, bw, bh) = layer.GetMapBounds();
+        return bw > 0 && bh > 0 &&
+               mapX >= bx && mapX <= bx + bw &&
+               mapY >= by && mapY <= by + bh;
+    }
+
+    private static bool IsWestRibbonCandidate(CompositionLayer layer, IReadOnlyList<ZoneDefinition> zones)
+    {
+        float rot = ((layer.RotationDegrees % 360f) + 360f) % 360f;
+        if (rot >= 2f && rot <= 358f)
+            return false;
+
+        if (ResolveGroup(layer.ZoneId) == WallGroup.West)
+            return true;
+
+        if (!TryGetWestRibbon(zones, out var panels, out float ribbonY, out float ribbonH))
+            return false;
+
+        var size = layer.GetDrawSize();
+        if (size.X < 2f || size.Y < 2f)
+            return false;
+
+        float ribbonX0 = panels[0].RibbonX;
+        float ribbonX1 = panels[^1].RibbonX + panels[^1].RibbonWidth;
+        return layer.X + size.X > ribbonX0 &&
+               layer.X < ribbonX1 &&
+               layer.Y + size.Y > ribbonY &&
+               layer.Y < ribbonY + ribbonH;
+    }
+
+    private static bool TryGetWestRibbon(
+        IReadOnlyList<ZoneDefinition> zones,
+        out List<WestRibbonPanel> panels,
+        out float ribbonY,
+        out float ribbonH)
+    {
+        panels = [];
+        ribbonY = 0f;
+        ribbonH = 0f;
+        float x = 0f;
+        bool started = false;
+
+        foreach (var id in WestZoneIds)
+        {
+            var zone = zones.FirstOrDefault(z => z.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+            if (zone is null)
+                return false;
+
+            float w = zone.ContentWidth > 0 ? zone.ContentWidth : zone.Width;
+            if (!started)
+            {
+                x = zone.X;
+                ribbonY = zone.Y;
+                ribbonH = zone.Height > 0 ? zone.Height : 1200f;
+                started = true;
+            }
+
+            panels.Add(new WestRibbonPanel
+            {
+                RibbonX = x,
+                RibbonWidth = w
+            });
+            x += w;
+        }
+
+        return panels.Count > 0;
+    }
+
+    private enum SlideFrom { Left, Right, Top, Bottom }
+
+    /// <summary>Hide the 1 px raster/filter hairline where two copies meet.</summary>
+    private const float SeamOverlapPx = 2f;
 
     public static void ComputeWallPose(CompositionLayer layer, ZoneDefinition zone,
         out float x, out float y, out float scale, out float rotation)
     {
-        rotation = zone.RotationDegrees;
+        rotation = ResolveGroup(zone.Id) is WallGroup g
+            ? ZoneRotation(g)
+            : zone.RotationDegrees;
         float targetW = zone.ContentWidth > 0 ? zone.ContentWidth : zone.Width;
         float targetH = zone.ContentHeight > 0 ? zone.ContentHeight : zone.Height;
         float zcx = zone.X + zone.Width * 0.5f;
         float zcy = zone.Y + zone.Height * 0.5f;
 
-        if (layer.NativeWidth <= 0 || layer.NativeHeight <= 0)
+        var (srcW, srcH) = layer.GetSourcePixelSize();
+        if (srcW <= 0 || srcH <= 0)
         {
             scale = 1f;
             x = zcx - targetW * 0.5f;
@@ -173,9 +367,9 @@ public static class WallCarousel
         }
 
         // Always fit zone height (centered horizontally).
-        scale = targetH / layer.NativeHeight;
-        float dw = layer.NativeWidth * scale;
-        float dh = layer.NativeHeight * scale;
+        scale = targetH / srcH;
+        float dw = srcW * scale;
+        float dh = srcH * scale;
         x = zcx - dw * 0.5f;
         y = zcy - dh * 0.5f;
     }
@@ -189,16 +383,14 @@ public static class WallCarousel
         float zcx = zone.X + zone.Width * 0.5f;
         float zcy = zone.Y + zone.Height * 0.5f;
 
-        if (layer.NativeWidth <= 0 || layer.NativeHeight <= 0)
+        var (srcW, srcH) = layer.GetSourcePixelSize();
+        if (srcW <= 0 || srcH <= 0)
         {
             scale = 1f;
             x = zcx - targetW * 0.5f;
             y = zcy - targetH * 0.5f;
             return;
         }
-
-        float srcW = layer.NativeWidth;
-        float srcH = layer.NativeHeight;
         scale = mode switch
         {
             ScaleMode.FitZone => MathF.Min(targetW / srcW, targetH / srcH),
@@ -217,17 +409,33 @@ public static class WallCarousel
         IReadOnlyList<ZoneDefinition> zones,
         IReadOnlyList<CompositionLayer> layers)
     {
-        var zone = BuildTargetZone(group, zones);
         CompositionLayer? best = null;
-        float bestArea = 0f;
-        foreach (var layer in layers.Where(l => !IsMovingCopy(l) && l.IsEffectivelyVisible))
+        float bestArea = -1f;
+        foreach (var layer in layers.Where(l => IsCarouselSource(l) && l.IsLogicallyVisible))
         {
+            if (ResolveGroup(layer.ZoneId) != group)
+                continue;
+            float area = LayerArea(layer);
+            if (area >= bestArea)
+            {
+                bestArea = area;
+                best = layer;
+            }
+        }
+
+        if (best is not null)
+            return best;
+
+        var zone = BuildTargetZone(group, zones);
+        bestArea = -1f;
+        foreach (var layer in layers.Where(l => IsCarouselSource(l) && l.IsLogicallyVisible))
+        {
+            if (ResolveGroup(layer.ZoneId) is not null)
+                continue;
             if (!IsLayerCenterInZone(layer, zone))
                 continue;
-
-            var (_, _, bw, bh) = layer.GetMapBounds();
-            float area = bw * bh;
-            if (area > bestArea)
+            float area = LayerArea(layer);
+            if (area >= bestArea)
             {
                 bestArea = area;
                 best = layer;
@@ -235,6 +443,12 @@ public static class WallCarousel
         }
 
         return best;
+    }
+
+    private static float LayerArea(CompositionLayer layer)
+    {
+        var (_, _, bw, bh) = layer.GetMapBounds();
+        return bw * bh;
     }
 
     public static string? DescribeMissingWallLayers(
@@ -265,7 +479,7 @@ public static class WallCarousel
 
     public static CompositionLayer CreateMovingCopy(CompositionLayer source)
     {
-        return new CompositionLayer
+        var copy = new CompositionLayer
         {
             Name = source.Name + " " + MovingLayerMarker,
             SourceKind = source.SourceKind,
@@ -274,17 +488,24 @@ public static class WallCarousel
             Y = source.Y,
             Scale = source.Scale,
             RotationDegrees = source.RotationDegrees,
-            Opacity = source.Opacity,
+            Opacity = source.Opacity <= 0 ? 1f : source.Opacity,
             ScaleMode = source.ScaleMode,
             ZoneId = null,
             Visible = true,
             ParentGroupVisible = true,
+            ParentGroupDrawOpacity = 1f,
             ZIndex = source.ZIndex + 1,
             NativeWidth = source.NativeWidth,
             NativeHeight = source.NativeHeight,
+            CropX = source.CropX,
+            CropY = source.CropY,
+            CropW = source.CropW,
+            CropH = source.CropH,
             BlackKeyEnabled = source.BlackKeyEnabled,
             BlackKeyThreshold = source.BlackKeyThreshold
         };
+        copy.SnapDrawOpacity();
+        return copy;
     }
 
     /// <summary>
@@ -302,14 +523,22 @@ public static class WallCarousel
         var westLayer = FindLayerForGroup(WallGroup.West, zones, layers)!;
         var ostLayer = FindLayerForGroup(WallGroup.Ost, zones, layers)!;
         var sudLayer = FindLayerForGroup(WallGroup.Sud, zones, layers)!;
+        if (westLayer == ostLayer || ostLayer == sudLayer || sudLayer == westLayer)
+            return null;
 
+        return BuildSimultaneousCycle(zones, westLayer, ostLayer, sudLayer, direction);
+    }
+
+    public static WallSimultaneousCycle BuildSimultaneousCycle(
+        IReadOnlyList<ZoneDefinition> zones,
+        CompositionLayer westLayer,
+        CompositionLayer ostLayer,
+        CompositionLayer sudLayer,
+        WallCarouselDirection direction = WallCarouselDirection.WestToOst)
+    {
         var westZone = BuildTargetZone(WallGroup.West, zones);
         var ostZone = BuildTargetZone(WallGroup.Ost, zones);
         var sudZone = BuildTargetZone(WallGroup.Sud, zones);
-
-        float slideWest = westZone.Width * 1.05f;
-        float slideOst = ostZone.Width * 1.05f;
-        float slideSud = sudZone.Height * 1.05f;
 
         var tracks = new List<WallMotionTrack>();
         var commits = new List<WallCommitSpec>();
@@ -317,13 +546,9 @@ public static class WallCarousel
 
         if (direction == WallCarouselDirection.WestToOst)
         {
-            tracks.Add(OutgoingCopy(WallGroup.West, westLayer, movingCopies, westLayer.X + slideWest, westLayer.Y));
-            tracks.Add(OutgoingCopy(WallGroup.Ost, ostLayer, movingCopies, ostLayer.X - slideOst, ostLayer.Y));
-            tracks.Add(OutgoingCopy(WallGroup.Sud, sudLayer, movingCopies, sudLayer.X, sudLayer.Y - slideSud));
-
-            tracks.Add(BuildIncoming(WallGroup.West, sudLayer, westLayer, westZone, movingCopies, slideWest, fromLeft: true));
-            tracks.Add(BuildIncoming(WallGroup.Ost, westLayer, ostLayer, ostZone, movingCopies, slideOst, fromRight: true));
-            tracks.Add(BuildIncoming(WallGroup.Sud, ostLayer, sudLayer, sudZone, movingCopies, slideSud, fromBottom: true));
+            AddSlidePair(tracks, movingCopies, WallGroup.West, westLayer, sudLayer, westZone, SlideFrom.Left);
+            AddSlidePair(tracks, movingCopies, WallGroup.Ost, ostLayer, westLayer, ostZone, SlideFrom.Right);
+            AddSlidePair(tracks, movingCopies, WallGroup.Sud, sudLayer, ostLayer, sudZone, SlideFrom.Bottom);
 
             AddCommit(commits, westLayer, ostZone);
             AddCommit(commits, ostLayer, sudZone);
@@ -331,13 +556,9 @@ public static class WallCarousel
         }
         else
         {
-            tracks.Add(OutgoingCopy(WallGroup.West, westLayer, movingCopies, westLayer.X - slideWest, westLayer.Y));
-            tracks.Add(OutgoingCopy(WallGroup.Ost, ostLayer, movingCopies, ostLayer.X + slideOst, ostLayer.Y));
-            tracks.Add(OutgoingCopy(WallGroup.Sud, sudLayer, movingCopies, sudLayer.X, sudLayer.Y + slideSud));
-
-            tracks.Add(BuildIncoming(WallGroup.West, ostLayer, westLayer, westZone, movingCopies, slideWest, fromRight: true));
-            tracks.Add(BuildIncoming(WallGroup.Sud, westLayer, sudLayer, sudZone, movingCopies, slideSud, fromTop: true));
-            tracks.Add(BuildIncoming(WallGroup.Ost, sudLayer, ostLayer, ostZone, movingCopies, slideOst, fromLeft: true));
+            AddSlidePair(tracks, movingCopies, WallGroup.West, westLayer, ostLayer, westZone, SlideFrom.Right);
+            AddSlidePair(tracks, movingCopies, WallGroup.Sud, sudLayer, westLayer, sudZone, SlideFrom.Top);
+            AddSlidePair(tracks, movingCopies, WallGroup.Ost, ostLayer, sudLayer, ostZone, SlideFrom.Left);
 
             AddCommit(commits, westLayer, sudZone);
             AddCommit(commits, sudLayer, ostZone);
@@ -352,103 +573,117 @@ public static class WallCarousel
         };
     }
 
-    private static WallMotionTrack OutgoingCopy(
-        WallGroup group,
-        CompositionLayer source,
+    private static void AddSlidePair(
+        List<WallMotionTrack> tracks,
         List<WallMovingCopy> movingCopies,
-        float endX,
-        float endY)
-    {
-        var copy = CreateMovingCopy(source);
-        copy.Opacity = source.Opacity <= 0 ? 1f : source.Opacity;
-        movingCopies.Add(new WallMovingCopy
-        {
-            Source = source,
-            Copy = copy,
-            InsertAbove = source
-        });
-        return Outgoing(group, copy, endX, endY);
-    }
-
-    private static WallMotionTrack Outgoing(WallGroup group, CompositionLayer layer, float endX, float endY) => new()
-    {
-        Group = group,
-        Layer = layer,
-        IsIncomingCopy = false,
-        StartX = layer.X,
-        StartY = layer.Y,
-        StartScale = layer.Scale,
-        Rotation = layer.RotationDegrees,
-        EndX = endX,
-        EndY = endY,
-        EndScale = layer.Scale
-    };
-
-    private static WallMotionTrack BuildIncoming(
         WallGroup group,
-        CompositionLayer source,
-        CompositionLayer destinationLayer,
+        CompositionLayer outgoingSource,
+        CompositionLayer incomingSource,
         ZoneDefinition targetZone,
-        List<WallMovingCopy> movingCopies,
-        float slideDist,
-        bool fromLeft = false,
-        bool fromRight = false,
-        bool fromBottom = false,
-        bool fromTop = false)
+        SlideFrom from)
     {
-        ComputeWallPose(source, targetZone, out float endX, out float endY, out float endScale, out float endRot);
+        ComputeWallPose(incomingSource, targetZone, out float inEndX, out float inEndY, out float inScale, out float inRot);
 
-        float startX = endX;
-        float startY = endY;
-        if (fromLeft)
-        {
-            startX = endX - slideDist;
-            startY = endY;
-        }
-        else if (fromRight)
-        {
-            startX = endX + slideDist;
-            startY = endY;
-        }
-        else if (fromBottom)
-        {
-            startX = endX;
-            startY = endY + slideDist;
-        }
-        else if (fromTop)
-        {
-            startX = endX;
-            startY = endY - slideDist;
-        }
-
-        var copy = CreateMovingCopy(source);
-        copy.RotationDegrees = endRot;
-        copy.Scale = endScale;
-        copy.Opacity = source.Opacity <= 0 ? 1f : source.Opacity;
-        // Stack on destination wall so source→other-wall motion doesn't cover the exit.
+        var outCopy = CreateMovingCopy(outgoingSource);
+        outCopy.SetOpacityImmediate(outgoingSource.Opacity <= 0 ? 1f : outgoingSource.Opacity);
         movingCopies.Add(new WallMovingCopy
         {
-            Source = source,
-            Copy = copy,
-            InsertAbove = destinationLayer
+            Source = outgoingSource,
+            Copy = outCopy,
+            InsertAbove = outgoingSource
         });
 
-        copy.X = startX;
-        copy.Y = startY;
+        var outSize = outCopy.GetDrawSize();
+        MapAabb(outCopy.X, outCopy.Y, outSize.X, outSize.Y, outCopy.RotationDegrees,
+            out float omx, out float omy, out float omw, out float omh);
 
-        return new WallMotionTrack
+        var (inSrcW, inSrcH) = incomingSource.GetSourcePixelSize();
+        float inDw = MathF.Max(inSrcW * inScale, 1f);
+        float inDh = MathF.Max(inSrcH * inScale, 1f);
+        MapAabb(inEndX, inEndY, inDw, inDh, inRot, out float imxEnd, out float imyEnd, out float imw, out float imh);
+
+        float imx = imxEnd;
+        float imy = imyEnd;
+        switch (from)
+        {
+            case SlideFrom.Left:
+                imx = omx - imw + SeamOverlapPx;
+                break;
+            case SlideFrom.Right:
+                imx = omx + omw - SeamOverlapPx;
+                break;
+            case SlideFrom.Top:
+                imy = omy - imh + SeamOverlapPx;
+                break;
+            case SlideFrom.Bottom:
+                imy = omy + omh - SeamOverlapPx;
+                break;
+        }
+
+        LayerPosFromAabb(imx, imy, imw, imh, inDw, inDh, out float inStartX, out float inStartY);
+        float dx = inEndX - inStartX;
+        float dy = inEndY - inStartY;
+
+        tracks.Add(new WallMotionTrack
         {
             Group = group,
-            Layer = copy,
+            Layer = outCopy,
+            IsIncomingCopy = false,
+            StartX = outCopy.X,
+            StartY = outCopy.Y,
+            StartScale = outCopy.Scale,
+            Rotation = outCopy.RotationDegrees,
+            EndX = outCopy.X + dx,
+            EndY = outCopy.Y + dy,
+            EndScale = outCopy.Scale
+        });
+
+        var inCopy = CreateMovingCopy(incomingSource);
+        inCopy.RotationDegrees = inRot;
+        inCopy.Scale = inScale;
+        inCopy.X = inStartX;
+        inCopy.Y = inStartY;
+        inCopy.SetOpacityImmediate(incomingSource.Opacity <= 0 ? 1f : incomingSource.Opacity);
+        movingCopies.Add(new WallMovingCopy
+        {
+            Source = incomingSource,
+            Copy = inCopy,
+            InsertAbove = outgoingSource
+        });
+
+        tracks.Add(new WallMotionTrack
+        {
+            Group = group,
+            Layer = inCopy,
             IsIncomingCopy = true,
-            StartX = startX,
-            StartY = startY,
-            StartScale = endScale,
-            Rotation = endRot,
-            EndX = endX,
-            EndY = endY,
-            EndScale = endScale
-        };
+            StartX = inStartX,
+            StartY = inStartY,
+            StartScale = inScale,
+            Rotation = inRot,
+            EndX = inEndX,
+            EndY = inEndY,
+            EndScale = inScale
+        });
+    }
+
+    private static void MapAabb(float x, float y, float dw, float dh, float rotationDeg,
+        out float mx, out float my, out float mw, out float mh)
+    {
+        float rot = ((rotationDeg % 360f) + 360f) % 360f;
+        bool swap = MathF.Abs(rot - 90f) < 1f || MathF.Abs(rot - 270f) < 1f;
+        mw = swap ? dh : dw;
+        mh = swap ? dw : dh;
+        float cx = x + dw * 0.5f;
+        float cy = y + dh * 0.5f;
+        mx = cx - mw * 0.5f;
+        my = cy - mh * 0.5f;
+    }
+
+    private static void LayerPosFromAabb(float mx, float my, float mw, float mh, float dw, float dh,
+        out float x, out float y)
+    {
+        x = mx + mw * 0.5f - dw * 0.5f;
+        y = my + mh * 0.5f - dh * 0.5f;
     }
 
     private static void AddCommit(List<WallCommitSpec> commits, CompositionLayer original, ZoneDefinition targetZone)

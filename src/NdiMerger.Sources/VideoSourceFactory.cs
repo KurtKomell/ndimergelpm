@@ -117,6 +117,36 @@ public sealed class SourceRuntimeHub : IDisposable
         }
     }
 
+    public void RestartNdiSources()
+    {
+        lock (_lock)
+        {
+            if (_gpu is null)
+                return;
+
+            var ndiIds = _sources.Keys
+                .Where(id => id.StartsWith("Ndi:", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            foreach (var id in ndiIds)
+            {
+                var key = id[4..];
+                _sources[id].Dispose();
+                var source = VideoSourceFactory.Create(SourceKind.Ndi, key);
+                try
+                {
+                    source.Start(_gpu);
+                    _sources[id] = source;
+                }
+                catch
+                {
+                    source.Dispose();
+                    _sources.Remove(id);
+                }
+            }
+        }
+    }
+
     public void Dispose()
     {
         lock (_lock)
