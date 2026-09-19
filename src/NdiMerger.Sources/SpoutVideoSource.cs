@@ -95,7 +95,8 @@ public sealed class SpoutVideoSource : IVideoSource
 
         if (!_receiver.Receive())
         {
-            ReleaseSrv();
+            // Keep last SRV so compose + 3D walls still show the previous frame when
+            // Spout briefly fails to deliver (common under load / sender hitch).
             return;
         }
 

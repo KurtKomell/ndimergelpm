@@ -128,6 +128,8 @@ public partial class MainWindow : Window
     private void DrawOverlays()
     {
         OverlayCanvas.Children.Clear();
+        if (Vm.Room3DEnabled)
+            return;
         if (!TryGetCanvasSize(out var cw, out var ch) || cw <= 0 || ch <= 0)
             return;
         if (OverlayCanvas.Width <= 0 || OverlayCanvas.Height <= 0)
@@ -280,12 +282,45 @@ public partial class MainWindow : Window
     private void Preview_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         PreviewHost.CaptureMouse();
-        Vm.OnPreviewMouseDown(ToCanvasPixels(e), startDrag: true);
+        PreviewHost.Focus();
+        if (Vm.Room3DEnabled)
+        {
+            var p = e.GetPosition(PreviewHost);
+            bool shift = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
+            Vm.OnRoom3DMouseDown(p, PreviewHost.ActualWidth, PreviewHost.ActualHeight,
+                leftButton: true, rightButton: false, shift: shift);
+        }
+        else
+        {
+            Vm.OnPreviewMouseDown(ToCanvasPixels(e), startDrag: true);
+        }
         DrawOverlays();
+    }
+
+    private void Preview_MouseRightButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (!Vm.Room3DEnabled)
+            return;
+        PreviewHost.CaptureMouse();
+        PreviewHost.Focus();
+        var p = e.GetPosition(PreviewHost);
+        bool shift = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
+        Vm.OnRoom3DMouseDown(p, PreviewHost.ActualWidth, PreviewHost.ActualHeight,
+            leftButton: false, rightButton: true, shift: shift);
     }
 
     private void Preview_MouseMove(object sender, MouseEventArgs e)
     {
+        if (Vm.Room3DEnabled)
+        {
+            if (e.LeftButton == MouseButtonState.Pressed || e.RightButton == MouseButtonState.Pressed)
+            {
+                var p = e.GetPosition(PreviewHost);
+                Vm.OnRoom3DMouseMove(p, PreviewHost.ActualWidth, PreviewHost.ActualHeight);
+            }
+            return;
+        }
+
         if (e.LeftButton == MouseButtonState.Pressed)
         {
             Vm.OnPreviewMouseMove(ToCanvasPixels(e));
@@ -296,7 +331,36 @@ public partial class MainWindow : Window
     private void Preview_MouseLeftButtonUp(object sender, MouseEventArgs e)
     {
         PreviewHost.ReleaseMouseCapture();
-        Vm.OnPreviewMouseUp();
+        if (Vm.Room3DEnabled)
+            Vm.OnRoom3DMouseUp();
+        else
+            Vm.OnPreviewMouseUp();
         DrawOverlays();
+    }
+
+    private void Preview_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        PreviewHost.ReleaseMouseCapture();
+        if (Vm.Room3DEnabled)
+            Vm.OnRoom3DMouseUp();
+    }
+
+    private void Preview_MouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        if (Vm.Room3DEnabled)
+        {
+            PreviewHost.Focus();
+            Vm.OnRoom3DMouseWheel(e.Delta);
+            e.Handled = true;
+        }
+    }
+
+    private void Preview_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (!Vm.Room3DEnabled)
+            return;
+        Vm.OnRoom3DKeyDown(e.Key);
+        if (e.Key == Key.R)
+            e.Handled = true;
     }
 }

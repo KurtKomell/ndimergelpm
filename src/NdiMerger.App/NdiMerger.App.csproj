@@ -8,6 +8,7 @@
     <UseWPF>true</UseWPF>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <PlatformTarget>x64</PlatformTarget>
     <RootNamespace>NdiMerger.App</RootNamespace>
     <AssemblyName>NdiMergerLPM</AssemblyName>
@@ -30,6 +31,11 @@
       <Reference Remove="@(Reference)" Condition="$([System.String]::Copy('%(Identity)').Contains('WebView2.Wpf'))" />
     </ItemGroup>
   </Target>
+
+  <ItemGroup>
+    <Resource Include="Assets\app.ico" />
+    <Resource Include="Assets\performanieMAM.png" />
+  </ItemGroup>
 
   <ItemGroup>
     <None Include="NDI\ndi-config.v1.json" Link="NDI\ndi-config.v1.json" CopyToOutputDirectory="PreserveNewest" />

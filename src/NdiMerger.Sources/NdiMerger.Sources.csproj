@@ -15,6 +15,7 @@
       <!-- Keep runtime/native flowing to App; do not import WPF WebView2.targets into WPF/Output. -->
       <PrivateAssets>compile;build;buildTransitive;contentfiles;analyzers</PrivateAssets>
     </PackageReference>
+    <PackageReference Include="NAudio" Version="3.1.0" />
     <PackageReference Include="NDILibDotNet6" Version="1.0.11" />
     <PackageReference Include="Spout2.NET" Version="0.1.0-alpha.2" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />

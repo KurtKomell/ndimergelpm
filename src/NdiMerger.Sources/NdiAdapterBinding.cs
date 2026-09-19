@@ -15,7 +15,7 @@ public sealed class NdiAdapterChoice : IEquatable<NdiAdapterChoice>
         Id = "",
         Ipv4 = null,
         AdapterName = null,
-        DisplayName = "Automatisch (alle Netzwerkkarten)",
+        DisplayName = "Automatic (all network adapters)",
         BindTokens = []
     };
 

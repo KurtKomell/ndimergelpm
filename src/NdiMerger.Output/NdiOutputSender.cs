@@ -42,6 +42,7 @@ public sealed class NdiOutputSender : IDisposable
     private readonly int[] _mappedPitch = new int[StagingCount];
     private readonly bool[] _stagingMapped = new bool[StagingCount];
     private readonly ConcurrentQueue<int> _freeStaging = new();
+    private readonly object _audioSendLock = new();
     private BlockingCollection<int> _readyToSend = new(ReadyQueueCapacity);
     private BlockingCollection<int> _packQueue = new(1);
     private Thread? _sendThread;
@@ -75,6 +76,15 @@ public sealed class NdiOutputSender : IDisposable
     private ID3D11BlendState? _opaqueBlend;
     private ID3D11RasterizerState? _rasterizer;
 
+    // Optional downscale when canvas ≠ output size (slider-driven send resolution).
+    private ID3D11Texture2D? _scaleBgra;
+    private ID3D11RenderTargetView? _scaleRtv;
+    private ID3D11ShaderResourceView? _scaleSrcSrv;
+    private IntPtr _scaleSrcNative;
+    private ID3D11VertexShader? _scaleVs;
+    private ID3D11PixelShader? _scalePs;
+    private ID3D11SamplerState? _scaleSampler;
+
     public string Name => _name;
     public bool IsActive => _sender != IntPtr.Zero;
     /// <summary>True when the pack thread can take a new frame without dropping.</summary>
@@ -98,12 +108,16 @@ public sealed class NdiOutputSender : IDisposable
     /// Canonical Full-NDI send profile. clock_video off, async, TargetFps.
     /// <paramref name="shqQuality"/> null = shared zone 10 Gbps budget.
     /// </summary>
-    public static NdiOutputSender CreateStandard(GpuDevice gpu, string name, int? shqQuality = null) =>
-        new(gpu, name, frameRate: NdiFrameSpec.TargetFps, shqQuality);
+    public static NdiOutputSender CreateStandard(GpuDevice gpu, string name, int? shqQuality = null, int frameRate = NdiFrameSpec.TargetFps) =>
+        new(gpu, name, frameRate: NormalizeFps(frameRate), shqQuality);
 
-    public static NdiOutputSender CreateFullFrame(GpuDevice gpu, string name, int width, int height) =>
-        new(gpu, name, NdiFrameSpec.TargetFps,
+    public static NdiOutputSender CreateFullFrame(GpuDevice gpu, string name, int width, int height, int frameRate = NdiFrameSpec.TargetFps) =>
+        new(gpu, name, NormalizeFps(frameRate),
             NdiMerger.Sources.NdiAdapterBinding.SpeedHqQualityPercent((long)width * height));
+
+    public static int NormalizeFps(int fps) => fps >= 45 ? 60 : 30;
+
+    public int FrameRate => _frameRate;
 
     public NdiOutputSender(GpuDevice gpu, string name, int frameRate = NdiFrameSpec.TargetFps, int? shqQuality = null)
     {
@@ -382,10 +396,15 @@ public sealed class NdiOutputSender : IDisposable
             return false;
 
         var desc = canvasTexture.Description;
-        if ((int)desc.Width != _width || (int)desc.Height != _height)
+        int srcW = (int)desc.Width;
+        int srcH = (int)desc.Height;
+
+        ID3D11Texture2D frameSource = canvasTexture;
+        if (srcW != _width || srcH != _height)
         {
-            throw new InvalidOperationException(
-                $"Canvas texture is {(int)desc.Width}×{(int)desc.Height}, expected {_width}×{_height}.");
+            if (!DownscaleToOutput(canvasTexture))
+                return false;
+            frameSource = _scaleBgra!;
         }
 
         int writeIdx = _stagingIndex % StagingCount;
@@ -398,10 +417,10 @@ public sealed class NdiOutputSender : IDisposable
         if (_packQueue.Count >= 1)
             return false;
 
-        ID3D11Texture2D gpuSrc = canvasTexture;
+        ID3D11Texture2D gpuSrc = frameSource;
         if (_useUyvy)
         {
-            if (!ConvertToUyvy(canvasTexture))
+            if (!ConvertToUyvy(frameSource))
                 return false;
             gpuSrc = _uyvyGpu!;
         }
@@ -423,6 +442,158 @@ public sealed class NdiOutputSender : IDisposable
         _stagingIndex = (_stagingIndex + 1) % StagingCount;
         _frameCounter++;
         return true;
+    }
+
+    /// <summary>
+    /// Send planar float audio on this sender (channel0[samples] then channel1…).
+    /// Safe to call from the capture/compose thread while video async-send runs.
+    /// </summary>
+    public bool SendAudio(float[] planarData, int channels, int samples, int sampleRate)
+    {
+        if (_shuttingDown || !_initialized || _sender == IntPtr.Zero)
+            return false;
+        if (planarData is null || channels <= 0 || samples <= 0 || sampleRate <= 0)
+            return false;
+        if (planarData.Length < channels * samples)
+            return false;
+
+        var handle = GCHandle.Alloc(planarData, GCHandleType.Pinned);
+        try
+        {
+            var frame = new NDIlib.audio_frame_v2_t
+            {
+                sample_rate = sampleRate,
+                no_channels = channels,
+                no_samples = samples,
+                timecode = SynthesizeTimecode,
+                p_data = handle.AddrOfPinnedObject(),
+                channel_stride_in_bytes = samples * sizeof(float),
+                p_metadata = IntPtr.Zero
+            };
+
+            lock (_audioSendLock)
+            {
+                if (_shuttingDown || _sender == IntPtr.Zero)
+                    return false;
+                NDIlib.send_send_audio_v2(_sender, ref frame);
+            }
+
+            return true;
+        }
+        finally
+        {
+            handle.Free();
+        }
+    }
+
+    private bool DownscaleToOutput(ID3D11Texture2D canvasTexture)
+    {
+        if (!EnsureScalePipeline())
+            return false;
+
+        if (_scaleSrcNative != canvasTexture.NativePointer)
+        {
+            _scaleSrcSrv?.Dispose();
+            _scaleSrcSrv = _gpu.Device.CreateShaderResourceView(canvasTexture);
+            _scaleSrcNative = canvasTexture.NativePointer;
+        }
+
+        if (_scaleSrcSrv is null || _scaleRtv is null || _scaleVs is null || _scalePs is null || _scaleSampler is null)
+            return false;
+
+        var ctx = _gpu.Context;
+        ctx.OMSetRenderTargets(_scaleRtv);
+        ctx.OMSetBlendState(_opaqueBlend);
+        ctx.OMSetDepthStencilState(null);
+        ctx.RSSetState(_rasterizer);
+        ctx.RSSetViewport(new Viewport(0, 0, _width, _height));
+        ctx.IASetInputLayout(null!);
+        ctx.IASetVertexBuffer(0, null!, 0);
+        ctx.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+        ctx.VSSetShader(_scaleVs);
+        ctx.PSSetShader(_scalePs);
+        ctx.PSSetSampler(0, _scaleSampler);
+        ctx.PSSetShaderResource(0, _scaleSrcSrv);
+        ctx.Draw(3, 0);
+        ctx.PSSetShaderResource(0, null!);
+        ctx.PSSetSampler(0, null!);
+        ctx.OMSetRenderTargets((ID3D11RenderTargetView)null!);
+        return true;
+    }
+
+    private bool EnsureScalePipeline()
+    {
+        if (_scaleBgra is not null &&
+            (int)_scaleBgra.Description.Width == _width &&
+            (int)_scaleBgra.Description.Height == _height &&
+            _scaleVs is not null)
+            return true;
+
+        DisposeScalePipeline();
+        try
+        {
+            const string hlsl = """
+                Texture2D src : register(t0);
+                SamplerState samp : register(s0);
+
+                void VSMain(uint id : SV_VertexID, out float4 pos : SV_Position, out float2 uv : TEXCOORD0)
+                {
+                    float2 u = float2((id << 1) & 2, id & 2);
+                    pos = float4(u * float2(2, -2) + float2(-1, 1), 0, 1);
+                    uv = u;
+                }
+
+                float4 PSMain(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
+                {
+                    return src.Sample(samp, uv);
+                }
+                """;
+
+            var vsBlob = Compiler.Compile(hlsl, "VSMain", "ndi_scale.hlsl", "vs_4_0");
+            var psBlob = Compiler.Compile(hlsl, "PSMain", "ndi_scale.hlsl", "ps_4_0");
+            _scaleVs = _gpu.Device.CreateVertexShader(vsBlob.Span);
+            _scalePs = _gpu.Device.CreatePixelShader(psBlob.Span);
+            _scaleSampler = _gpu.Device.CreateSamplerState(new SamplerDescription
+            {
+                Filter = Filter.MinMagMipLinear,
+                AddressU = TextureAddressMode.Clamp,
+                AddressV = TextureAddressMode.Clamp,
+                AddressW = TextureAddressMode.Clamp,
+                MaxLOD = float.MaxValue
+            });
+            _scaleBgra = _gpu.CreateTexture(_width, _height, Format.B8G8R8A8_UNorm, BindFlags.RenderTarget | BindFlags.ShaderResource);
+            _scaleRtv = _gpu.Device.CreateRenderTargetView(_scaleBgra);
+
+            if (_opaqueBlend is null)
+            {
+                var blendDesc = new BlendDescription { AlphaToCoverageEnable = false, IndependentBlendEnable = false };
+                blendDesc.RenderTarget[0] = new RenderTargetBlendDescription
+                {
+                    BlendEnable = false,
+                    RenderTargetWriteMask = ColorWriteEnable.All
+                };
+                _opaqueBlend = _gpu.Device.CreateBlendState(blendDesc);
+            }
+
+            if (_rasterizer is null)
+            {
+                _rasterizer = _gpu.Device.CreateRasterizerState(new RasterizerDescription
+                {
+                    CullMode = CullMode.None,
+                    FillMode = FillMode.Solid,
+                    FrontCounterClockwise = false,
+                    DepthClipEnable = false,
+                    ScissorEnable = false
+                });
+            }
+
+            return true;
+        }
+        catch
+        {
+            DisposeScalePipeline();
+            return false;
+        }
     }
 
     private void PackLoop()
@@ -727,6 +898,8 @@ public sealed class NdiOutputSender : IDisposable
 
         DisposeReadbackPipeline();
         DisposeUyvyPipeline();
+        DisposeScalePipeline();
+        DisposeSharedDrawState();
 
         while (_freeStaging.TryDequeue(out _)) { }
         for (int i = 0; i < StagingCount; i++)
@@ -762,6 +935,27 @@ public sealed class NdiOutputSender : IDisposable
         _uyvyVs = null;
         _uyvyPs?.Dispose();
         _uyvyPs = null;
+    }
+
+    private void DisposeScalePipeline()
+    {
+        _scaleSrcSrv?.Dispose();
+        _scaleSrcSrv = null;
+        _scaleSrcNative = IntPtr.Zero;
+        _scaleRtv?.Dispose();
+        _scaleRtv = null;
+        _scaleBgra?.Dispose();
+        _scaleBgra = null;
+        _scaleVs?.Dispose();
+        _scaleVs = null;
+        _scalePs?.Dispose();
+        _scalePs = null;
+        _scaleSampler?.Dispose();
+        _scaleSampler = null;
+    }
+
+    private void DisposeSharedDrawState()
+    {
         _opaqueBlend?.Dispose();
         _opaqueBlend = null;
         _rasterizer?.Dispose();

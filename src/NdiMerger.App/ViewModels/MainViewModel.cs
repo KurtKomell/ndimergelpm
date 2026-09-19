@@ -1,9 +1,12 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -34,8 +37,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private SpoutSourceCatalog? _spoutCatalog;
     private GpuDevice? _gpu;
     private PixelMapCompositor? _compositor;
+    private Room3DRenderer? _room3D;
     private NdiOutputSender? _ndiOut;
     private PixelMapDefinition _pixelMap = new();
+    private string _assetsDir = "";
     private WriteableBitmap? _previewBitmap;
     private int _lastPreviewGen = -1;
     private int _previewPresentQueued;
@@ -55,8 +60,24 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private float _dragStartX;
     private float _dragStartY;
     private bool _isDragging;
+    private bool _roomOrbiting;
+    private bool _roomPanning;
+    private bool _roomWallDragging;
+    private string? _roomDragZoneId;
+    private Point _roomLastMouse;
+    private Vector2 _roomDragStartOffset;
+    private Point _roomDragMouseStart;
+    private bool _roomMovedEnough;
+    private bool _roomAssembleAnimating;
+    private DateTime _roomAssembleAnimStart;
+    private double _roomAssembleAnimFrom;
+    private double _roomAssembleAnimTo;
     private AppSession? _loadedSession;
     private LidarTrackingService? _lidar;
+    private readonly WasapiAudioCapture _audioCapture = new();
+    private bool _suppressAudioApply;
+    private readonly Dictionary<string, Vector2> _roomWallOffsets =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public AppSession? LoadedSession => _loadedSession;
 
@@ -69,6 +90,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     public ObservableCollection<string> ComPorts { get; } = [];
     public ObservableCollection<NdiAdapterChoice> NdiAdapters { get; } = [];
     public ObservableCollection<NdiZoneStreamItem> NdiZoneStreams { get; } = [];
+    public ObservableCollection<AudioDeviceInfo> AudioDevices { get; } = [];
 
     [ObservableProperty] private ImageSource? _previewImage;
     [ObservableProperty] private CompositionLayer? _selectedLayer;
@@ -76,16 +98,42 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private DiscoveredSource? _selectedSource;
     [ObservableProperty] private ZoneDefinition? _selectedZone;
     [ObservableProperty] private ScaleMode _selectedScaleMode = ScaleMode.Native;
+    /// <summary>When true, releasing a dragged layer near a wall snaps it into that zone. Toggling does not move existing layers.</summary>
+    [ObservableProperty] private bool _autoSnapEnabled = false;
     [ObservableProperty] private string _outputName = "MAM-Pixelmap";
     [ObservableProperty] private bool _ndiSending = true;
+    [ObservableProperty] private double _ndiOutputScalePercent = 100;
+    [ObservableProperty] private string _ndiOutputSizeLabel = "8038×5798";
+    [ObservableProperty] private int _ndiOutputFps = 30;
     [ObservableProperty] private NdiAdapterChoice? _selectedNdiAdapter;
-    [ObservableProperty] private string _ndiSendingNicText = "Sendet: …";
+    [ObservableProperty] private string _ndiSendingNicText = "Sending: …";
+    [ObservableProperty] private AudioDeviceInfo? _selectedAudioDevice;
+    [ObservableProperty] private bool _audioEnabled;
+    /// <summary>Ausgangslautstärke in percent (0–200). 100 = unity gain to NDI.</summary>
+    [ObservableProperty] private double _audioOutputGainPercent = 100;
+    [ObservableProperty] private double _audioPeakL;
+    [ObservableProperty] private double _audioPeakR;
+    [ObservableProperty] private double _audioClipHoldL = 1;
+    [ObservableProperty] private double _audioClipHoldR = 1;
+    [ObservableProperty] private bool _audioClipVisibleL;
+    [ObservableProperty] private bool _audioClipVisibleR;
     private int _nicProbeTick;
     private bool _ndiAdapterReady;
     private bool _suppressNdiStreamRecreate;
     [ObservableProperty] private bool _showBackgroundInPreview = true;
     [ObservableProperty] private bool _showBackgroundInOutput = false;
     [ObservableProperty] private bool _showLayerOverlays = true;
+    [ObservableProperty] private bool _showReflectionPanel;
+    [ObservableProperty] private bool _showLidarPanel;
+    [ObservableProperty] private bool _showNdiPanel;
+    [ObservableProperty] private bool _showRoom3DPanel;
+    [ObservableProperty] private bool _room3DEnabled;
+    [ObservableProperty] private bool _roomWallEditMode;
+    [ObservableProperty] private double _roomAssembleT = 1.0;
+    [ObservableProperty] private bool _roomPhotoOverlayEnabled;
+    [ObservableProperty] private double _roomPhotoOverlayOpacity = 0.35;
+    [ObservableProperty] private double _roomContentRotation;
+    [ObservableProperty] private bool _roomContentFlipVertical;
     [ObservableProperty] private string _selectedSourceHud = "";
     [ObservableProperty] private string _statusText = "Starting…";
     [ObservableProperty] private double _fps;
@@ -109,7 +157,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private bool _lidarEnabled = true;
     [ObservableProperty] private string? _selectedComPort;
     [ObservableProperty] private bool _lidarConnected;
-    [ObservableProperty] private string _lidarStatusText = "LiDAR getrennt";
+    [ObservableProperty] private string _lidarStatusText = "LiDAR disconnected";
     [ObservableProperty] private double _lidarRpm;
     [ObservableProperty] private int _lidarPointsPerRev;
     [ObservableProperty] private bool _lidarShowDebugPoints = true;
@@ -145,6 +193,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private double _lidarTrailStrength = 0.5;
 
     public Array ScaleModes { get; } = Enum.GetValues(typeof(ScaleMode));
+    public int[] NdiOutputFpsChoices { get; } = [30, 60];
     public IReadOnlyList<CarouselDirectionChoice> CarouselDirections =>
         WallCarousel.DirectionChoices;
 
@@ -176,6 +225,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     {
         try
         {
+            _assetsDir = assetsDir;
             _loadedSession = SessionStore.TryLoad();
             var savedLayout = _loadedSession?.Layout;
             SelectNdiAdapter(savedLayout?.NdiAdapterId, savedLayout?.NdiAdapterIp, recreateSender: false);
@@ -187,11 +237,15 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 ShowBackgroundInPreview = savedLayout.ShowBackgroundInPreview;
                 ShowLayerOverlays = savedLayout.ShowLayerOverlays;
                 NdiSending = savedLayout.NdiSending;
+                NdiOutputScalePercent = Math.Clamp(
+                    savedLayout.NdiOutputScalePercent <= 0 ? 100 : savedLayout.NdiOutputScalePercent, 10, 100);
+                NdiOutputFps = savedLayout.NdiOutputFps >= 45 ? 60 : 30;
                 SelectedScaleMode = savedLayout.SelectedScaleMode;
                 CarouselDurationSeconds = Math.Clamp(savedLayout.CarouselDurationSeconds, 0.3, 5.0);
                 FadeDurationSeconds = Math.Clamp(savedLayout.FadeDurationSeconds, 0.0, 10.0);
                 CarouselDirection = savedLayout.CarouselDirection;
                 ApplyFloorReflectionSettings(savedLayout);
+                ApplyRoom3DSettings(savedLayout);
                 ApplyLidarSettings(savedLayout.Lidar);
             }
 
@@ -217,6 +271,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             CanvasInfo = $"{_pixelMap.Name}  {_pixelMap.CanvasWidth}×{_pixelMap.CanvasHeight}";
             CanvasWidth = _pixelMap.CanvasWidth;
             CanvasHeight = _pixelMap.CanvasHeight;
+            {
+                var (ow, oh) = ComputeNdiOutputSize();
+                UpdateNdiOutputSizeLabel(ow, oh);
+            }
             NdiFrameSpec.ValidateCanvasSize(_pixelMap.CanvasWidth, _pixelMap.CanvasHeight);
 
             _gpu = new GpuDevice();
@@ -224,6 +282,13 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             _hub.AttachGpu(_gpu);
             _compositor = new PixelMapCompositor(_gpu, _pixelMap.CanvasWidth, _pixelMap.CanvasHeight);
             _compositor.PreviewFrameReady += OnPreviewFrameReady;
+            _room3D = new Room3DRenderer(_gpu);
+            _room3D.RebuildPanels(Zones);
+            ApplyRoomWallOffsetsToRenderer();
+            _room3D.AssembleT = (float)RoomAssembleT;
+            _room3D.PhotoOverlayEnabled = RoomPhotoOverlayEnabled;
+            _room3D.PhotoOverlayOpacity = (float)RoomPhotoOverlayOpacity;
+            LoadRoomPhotos(assetsDir);
             _previewBitmap = new WriteableBitmap(
                 _compositor.PreviewWidth, _compositor.PreviewHeight, 96, 96,
                 PixelFormats.Bgra32, null);
@@ -271,6 +336,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             catch { /* optional */ }
 
             RefreshSources();
+            RefreshAudioDevices();
+            ApplyAudioSettings(
+                savedLayout?.AudioDeviceId,
+                savedLayout?.AudioEnabled ?? false,
+                savedLayout?.AudioOutputGainPercent ?? 100);
             if (savedLayout is not null)
             {
                 SelectedZone = string.IsNullOrEmpty(savedLayout.SelectedZoneId)
@@ -289,7 +359,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             };
             _renderThread.Start();
             if (!StatusText.StartsWith("NDI init failed") && !StatusText.StartsWith("WARN:"))
-                StatusText = $"Ready | NDI {NdiFrameSpec.Width}×{NdiFrameSpec.Height} UYVY SpeedHQ {NdiFrameSpec.TargetFps}fps 10GbE | {NdiFrameSpec.FormatBufferSizeMb()}";
+                StatusText = $"Ready | NDI {NdiFrameSpec.Width}×{NdiFrameSpec.Height} UYVY SpeedHQ {NdiOutputFps}fps 10GbE | {NdiFrameSpec.FormatBufferSizeMb()}";
         }
         catch (Exception ex)
         {
@@ -325,7 +395,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     {
         if (string.IsNullOrWhiteSpace(SelectedComPort))
         {
-            LidarStatusText = "Kein COM-Port gewählt.";
+            LidarStatusText = "No COM port selected.";
             return;
         }
 
@@ -336,7 +406,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         catch (Exception ex)
         {
             LidarConnected = false;
-            LidarStatusText = $"Verbindung fehlgeschlagen: {ex.Message}";
+            LidarStatusText = $"Connection failed: {ex.Message}";
         }
     }
 
@@ -347,7 +417,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         LidarConnected = false;
         LidarRpm = 0;
         LidarPointsPerRev = 0;
-        LidarStatusText = "LiDAR getrennt";
+        LidarStatusText = "LiDAR disconnected";
     }
 
     [RelayCommand]
@@ -364,7 +434,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _lidar.Disconnect();
         _lidar.Connect(port);
         LidarConnected = true;
-        LidarStatusText = $"Verbunden: {port}";
+        LidarStatusText = $"Connected: {port}";
     }
 
     private void SyncLidarServiceSettings(ZoneDefinition? floor)
@@ -515,6 +585,25 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     }
 
     [RelayCommand]
+    private void RefreshAudioDevices()
+    {
+        var previousId = SelectedAudioDevice?.Id;
+        AudioDevices.Clear();
+        foreach (var d in WasapiAudioCatalog.List())
+            AudioDevices.Add(d);
+
+        if (!string.IsNullOrEmpty(previousId))
+        {
+            SelectedAudioDevice = AudioDevices.FirstOrDefault(d => d.Id == previousId)
+                ?? AudioDevices.FirstOrDefault();
+        }
+        else if (SelectedAudioDevice is null)
+        {
+            SelectedAudioDevice = AudioDevices.FirstOrDefault();
+        }
+    }
+
+    [RelayCommand]
     private void AddSelectedSource()
     {
         if (SelectedSource is null || _gpu is null) return;
@@ -546,7 +635,13 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    private void AddLayerFromSource(SourceKind kind, string key, string displayName, int discoveredW = 0, int discoveredH = 0)
+    private void AddLayerFromSource(
+        SourceKind kind,
+        string key,
+        string displayName,
+        int discoveredW = 0,
+        int discoveredH = 0,
+        ZoneDefinition? snapTo = null)
     {
         IVideoSource runtime;
         try
@@ -566,6 +661,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
 
         var (nativeW, nativeH) = ResolveNativeSize(kind, key, displayName, runtime, discoveredW, discoveredH);
+        if (nativeW <= 0 || nativeH <= 0)
+        {
+            nativeW = 1920;
+            nativeH = 1080;
+        }
 
         var layer = new CompositionLayer
         {
@@ -584,14 +684,87 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         };
         layer.SnapDrawOpacity();
 
-        if (SelectedZone is not null)
-            layer.ApplyZone(SelectedZone, SelectedScaleMode);
+        var zone = snapTo ?? SelectedZone;
+        if (zone is not null)
+        {
+            // Auto-snap on → fit/fill into zone. Off → original size, centered on the wall.
+            var mode = AutoSnapEnabled
+                ? (SelectedScaleMode == ScaleMode.Native ? ScaleMode.FitZone : SelectedScaleMode)
+                : ScaleMode.Native;
+            layer.ApplyZone(zone, mode);
+        }
 
         Layers.Add(layer);
         SelectedLayer = layer;
         RebuildLayerTree();
         if (runtime is BrowserVideoSource browser)
             StatusText = $"{displayName} · capture={browser.CaptureMode}";
+        else if (zone is not null)
+            StatusText = $"Added {displayName} → {zone.Name}";
+    }
+
+    /// <summary>
+    /// If a source is selected, place it on the wall and clear the source selection.
+    /// </summary>
+    private bool TryPlaceSelectedSourceOnWall(ZoneDefinition target)
+    {
+        if (SelectedSource is null || _gpu is null)
+            return false;
+
+        var src = SelectedSource;
+        SelectedZone = Zones.FirstOrDefault(z => z.Id.Equals(target.Id, StringComparison.OrdinalIgnoreCase))
+                       ?? Zones.FirstOrDefault(z =>
+                           WallCarousel.ResolveGroup(z.Id) is WallGroup g &&
+                           WallCarousel.ResolveGroup(target.Id) == g)
+                       ?? SelectedZone;
+
+        AddLayerFromSource(src.Kind, src.Key, src.DisplayName, src.Width, src.Height, snapTo: target);
+        SelectedSource = null;
+        return true;
+    }
+
+    private ZoneDefinition? ResolveWallSnapTargetFromZoneId(string zoneId)
+    {
+        var zone = Zones.FirstOrDefault(z => z.Id.Equals(zoneId, StringComparison.OrdinalIgnoreCase));
+        if (zone is null)
+            return null;
+        if (zone.Id.Equals("floor", StringComparison.OrdinalIgnoreCase))
+            return null;
+        if (!zone.Id.StartsWith("wall_", StringComparison.OrdinalIgnoreCase))
+            return null;
+        return zone;
+    }
+
+    /// <summary>
+    /// Zone used for snap/refit. West 1–3 stay individual panels (not the carousel ribbon).
+    /// </summary>
+    private ZoneDefinition? ResolveLayerZone(string? zoneId)
+    {
+        if (string.IsNullOrEmpty(zoneId))
+            return null;
+        return Zones.FirstOrDefault(z => z.Id.Equals(zoneId, StringComparison.OrdinalIgnoreCase))
+               ?? PixelMapLoader.FindZone(_pixelMap, zoneId);
+    }
+
+    private ZoneDefinition? FindWallZoneAtMapPoint(double x, double y)
+    {
+        ZoneDefinition? best = null;
+        float bestArea = float.MaxValue;
+        foreach (var zone in EnumerateWallSnapZones())
+        {
+            if (x < zone.X || x > zone.X + zone.Width ||
+                y < zone.Y || y > zone.Y + zone.Height)
+                continue;
+
+            float area = MathF.Max(1f, zone.Width * zone.Height);
+            if (area < bestArea)
+            {
+                bestArea = area;
+                best = zone;
+            }
+        }
+
+        return best;
     }
 
     [RelayCommand]
@@ -621,6 +794,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             Y = src.Y + 40,
             Scale = src.Scale,
             RotationDegrees = src.RotationDegrees,
+            Room3DRotationDegrees = src.Room3DRotationDegrees,
+            Room3DFlipVertical = src.Room3DFlipVertical,
             Opacity = src.Opacity,
             ScaleMode = ScaleMode.Native,
             ZoneId = null,
@@ -631,13 +806,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             ZIndex = Layers.Count,
             NativeWidth = src.NativeWidth,
             NativeHeight = src.NativeHeight,
-            CropX = src.CropX,
-            CropY = src.CropY,
-            CropW = src.CropW,
-            CropH = src.CropH,
             BlackKeyEnabled = src.BlackKeyEnabled,
             BlackKeyThreshold = src.BlackKeyThreshold
         };
+        copy.SetCrop(src.CropX, src.CropY, src.CropW, src.CropH);
         copy.SnapDrawOpacity();
 
         Layers.Add(copy);
@@ -690,7 +862,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
         if (target is null)
         {
-            StatusText = "Select a group (or choose Gruppe), mark layers, then Assign.";
+            StatusText = "Select a group (or choose Group), mark layers, then Assign.";
             return;
         }
 
@@ -796,11 +968,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private void SnapToZone()
     {
         if (SelectedLayer is null || SelectedZone is null) return;
-        var group = WallCarousel.ResolveGroup(SelectedZone.Id);
-        var zone = group is not null
-            ? WallCarousel.BuildTargetZone(group.Value, Zones)
-            : SelectedZone;
-        SelectedLayer.ApplyZone(zone, SelectedScaleMode);
+        SelectedLayer.ApplyZone(SelectedZone, SelectedScaleMode);
         OnPropertyChanged(nameof(SelectedLayer));
     }
 
@@ -816,11 +984,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     {
         if (layer?.ZoneId is null || CarouselBusy)
             return;
+        // Native keeps authoring pose (X/Y/Scale); only Fit/Fill re-snap into the zone.
+        if (layer.ScaleMode is not (ScaleMode.FitZone or ScaleMode.FillZone))
+            return;
 
-        var group = WallCarousel.ResolveGroup(layer.ZoneId);
-        ZoneDefinition? zone = group is not null
-            ? WallCarousel.BuildTargetZone(group.Value, Zones)
-            : PixelMapLoader.FindZone(_pixelMap, layer.ZoneId);
+        var zone = ResolveLayerZone(layer.ZoneId);
         if (zone is not null)
             layer.ApplyZone(zone, layer.ScaleMode, applyZoneRotation: false);
     }
@@ -833,7 +1001,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
         if (Zones.Count == 0)
         {
-            StatusText = "Pixelmap/Zonen noch nicht geladen.";
+            StatusText = "Pixelmap/zones not loaded yet.";
             return;
         }
 
@@ -850,8 +1018,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
         catch (Exception ex)
         {
-            AbortWallCarousel($"Wand-Runde fehlgeschlagen: {ex.Message}");
-            MessageBox.Show(ex.ToString(), "Wand-Karussell");
+            AbortWallCarousel($"Wall round failed: {ex.Message}");
+            MessageBox.Show(ex.ToString(), "Wall carousel");
         }
     }
 
@@ -878,11 +1046,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         var missing = WallCarousel.DescribeMissingWallLayers(zoneList, layerList);
         if (missing is not null)
         {
-            AbortWallCarousel($"Fehlende Wand-Layer: {missing} — je einen Layer auf West/Ost/Süd snappen.");
+            AbortWallCarousel($"Missing wall layers: {missing} — snap one layer each to West/East/South.");
             MessageBox.Show(
-                $"Für die volle Runde fehlen Layer auf: {missing}\n\n" +
-                "Bitte je einen Spout/NDI-Layer auf West, Ost und Süd snappen (Zone snap).",
-                "Wand-Karussell",
+                $"Full round needs layers on: {missing}\n\n" +
+                "Snap one Spout/NDI layer each to West, East, and South (Zone snap).",
+                "Wall carousel",
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);
             return;
@@ -894,7 +1062,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         if (westLayer is null || ostLayer is null || sudLayer is null ||
             westLayer == ostLayer || ostLayer == sudLayer || sudLayer == westLayer)
         {
-            AbortWallCarousel("Wand-Runde konnte nicht gestartet werden.");
+            AbortWallCarousel("Wall round could not be started.");
             return;
         }
 
@@ -1043,8 +1211,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
         catch (Exception ex)
         {
-            AbortWallCarousel($"Wand-Runde abgebrochen: {ex.Message}");
-            MessageBox.Show(ex.ToString(), "Wand-Karussell");
+            AbortWallCarousel($"Wall round aborted: {ex.Message}");
+            MessageBox.Show(ex.ToString(), "Wall carousel");
         }
     }
 
@@ -1131,9 +1299,76 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         var dlg = new OpenFileDialog { Filter = "Layout JSON|*.json" };
         if (dlg.ShowDialog() != true) return;
         var doc = LayoutSerializer.Load(File.ReadAllText(dlg.FileName));
+        RefreshAudioDevices();
         ApplySettings(doc);
         ApplyLayers(doc);
         StatusText = $"Loaded {dlg.FileName}";
+    }
+
+    [RelayCommand]
+    private static void ExitApplication() => Application.Current.Shutdown();
+
+    [RelayCommand]
+    private static void ShowAbout()
+    {
+        MessageBox.Show(
+            "NdiMerger LPM — MAM Pixelmap\n\n" +
+            "Copyright © Kurt Komell Queps 2026\n\n" +
+            "Homepage:\n" +
+            "https://queps.com\n" +
+            "https://performanie.de\n\n" +
+            "In case of problems, please contact:\n" +
+            "kontakt@komell.com",
+            "Info",
+            MessageBoxButton.OK,
+            MessageBoxImage.Information);
+    }
+
+    [RelayCommand]
+    private static void ContactSupport()
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "mailto:kontakt@komell.com?subject=NdiMerger%20LPM%20support",
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"Could not open the mail client.\nPlease write to kontakt@komell.com\n\n{ex.Message}",
+                "Info",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+    }
+
+    [RelayCommand]
+    private static void OpenQuepsHomepage() => OpenUrl("https://queps.com");
+
+    [RelayCommand]
+    private static void OpenPerformanieHomepage() => OpenUrl("https://performanie.de");
+
+    private static void OpenUrl(string url)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = url,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"Could not open the browser.\n{url}\n\n{ex.Message}",
+                "Info",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
     }
 
     private LayoutDocument BuildLayoutDocument()
@@ -1150,6 +1385,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             ShowBackgroundInPreview,
             ShowLayerOverlays,
             NdiSending,
+            NdiOutputScalePercent,
+            NdiOutputFps,
             SelectedScaleMode,
             SelectedZone?.Id,
             selectedLayerKey,
@@ -1165,7 +1402,65 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             BuildLidarSettings(),
             SelectedNdiAdapter?.Id,
             SelectedNdiAdapter?.Ipv4,
-            NdiZoneStreams.Where(s => s.Enabled).Select(s => s.ZoneId));
+            NdiZoneStreams.Where(s => s.Enabled).Select(s => s.ZoneId),
+            Room3DEnabled,
+            (float)RoomAssembleT,
+            RoomPhotoOverlayEnabled,
+            (float)RoomPhotoOverlayOpacity,
+            CaptureRoomWallOffsets(),
+            SelectedAudioDevice?.Id,
+            AudioEnabled,
+            AudioOutputGainPercent);
+    }
+
+    private IReadOnlyList<RoomWallOffsetEntry> CaptureRoomWallOffsets()
+    {
+        return _roomWallOffsets
+            .Where(kv => kv.Value != Vector2.Zero)
+            .Select(kv => new RoomWallOffsetEntry
+            {
+                ZoneId = kv.Key,
+                OffsetX = kv.Value.X,
+                OffsetZ = kv.Value.Y
+            })
+            .ToList();
+    }
+
+    private void LoadRoomWallOffsets(IEnumerable<RoomWallOffsetEntry>? entries)
+    {
+        _roomWallOffsets.Clear();
+        if (entries is null)
+            return;
+        foreach (var e in entries)
+        {
+            if (string.IsNullOrWhiteSpace(e.ZoneId))
+                continue;
+            if (e.OffsetX == 0f && e.OffsetZ == 0f)
+                continue;
+            _roomWallOffsets[e.ZoneId] = new Vector2(e.OffsetX, e.OffsetZ);
+        }
+    }
+
+    private void ApplyRoomWallOffsetsToRenderer()
+    {
+        if (_room3D is null)
+            return;
+        foreach (var panel in _room3D.Panels)
+        {
+            if (panel.Kind != RoomPanelKind.Wall)
+                continue;
+            panel.Offset = _roomWallOffsets.TryGetValue(panel.ZoneId, out var off)
+                ? off
+                : Vector2.Zero;
+        }
+    }
+
+    private void StoreRoomWallOffset(string zoneId, Vector2 offset)
+    {
+        if (offset == Vector2.Zero)
+            _roomWallOffsets.Remove(zoneId);
+        else
+            _roomWallOffsets[zoneId] = offset;
     }
 
     private void ApplySettings(LayoutDocument doc)
@@ -1176,19 +1471,143 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         ShowBackgroundInPreview = doc.ShowBackgroundInPreview;
         ShowLayerOverlays = doc.ShowLayerOverlays;
         NdiSending = doc.NdiSending;
+        NdiOutputScalePercent = Math.Clamp(doc.NdiOutputScalePercent <= 0 ? 100 : doc.NdiOutputScalePercent, 10, 100);
+        NdiOutputFps = doc.NdiOutputFps >= 45 ? 60 : 30;
         SelectedScaleMode = doc.SelectedScaleMode;
         CarouselDurationSeconds = Math.Clamp(doc.CarouselDurationSeconds, 0.3, 5.0);
         FadeDurationSeconds = Math.Clamp(doc.FadeDurationSeconds, 0.0, 10.0);
         CarouselDirection = doc.CarouselDirection;
         ApplyFloorReflectionSettings(doc);
+        ApplyRoom3DSettings(doc);
         ApplyLidarSettings(doc.Lidar);
         ApplyEnabledNdiZones(doc.EnabledNdiZoneIds);
+        ApplyAudioSettings(doc.AudioDeviceId, doc.AudioEnabled, doc.AudioOutputGainPercent);
         if (Zones.Count > 0)
         {
             SelectedZone = string.IsNullOrEmpty(doc.SelectedZoneId)
                 ? null
                 : Zones.FirstOrDefault(z => z.Id == doc.SelectedZoneId);
         }
+    }
+
+    private void ApplyAudioSettings(string? deviceId, bool enabled, double gainPercent = 100)
+    {
+        _suppressAudioApply = true;
+        try
+        {
+            if (!string.IsNullOrEmpty(deviceId))
+            {
+                SelectedAudioDevice = AudioDevices.FirstOrDefault(d => d.Id == deviceId)
+                    ?? SelectedAudioDevice
+                    ?? AudioDevices.FirstOrDefault();
+            }
+            else if (SelectedAudioDevice is null)
+            {
+                SelectedAudioDevice = AudioDevices.FirstOrDefault();
+            }
+
+            AudioOutputGainPercent = Math.Clamp(gainPercent <= 0 ? 100 : gainPercent, 0, 200);
+            _audioCapture.OutputGain = (float)(AudioOutputGainPercent / 100.0);
+            AudioEnabled = enabled;
+        }
+        finally
+        {
+            _suppressAudioApply = false;
+        }
+
+        SyncAudioCapture();
+    }
+
+    partial void OnAudioOutputGainPercentChanged(double value)
+    {
+        double clamped = Math.Clamp(value, 0, 200);
+        if (Math.Abs(clamped - value) > 0.001)
+        {
+            AudioOutputGainPercent = clamped;
+            return;
+        }
+
+        _audioCapture.OutputGain = (float)(clamped / 100.0);
+    }
+
+    partial void OnAudioEnabledChanged(bool value)
+    {
+        if (_suppressAudioApply) return;
+        SyncAudioCapture();
+    }
+
+    partial void OnSelectedAudioDeviceChanged(AudioDeviceInfo? value)
+    {
+        if (_suppressAudioApply) return;
+        if (AudioEnabled)
+            SyncAudioCapture();
+    }
+
+    private void SyncAudioCapture()
+    {
+        try
+        {
+            if (!AudioEnabled || SelectedAudioDevice is null)
+            {
+                _audioCapture.Stop();
+                AudioPeakL = 0;
+                AudioPeakR = 0;
+                AudioClipVisibleL = false;
+                AudioClipVisibleR = false;
+                return;
+            }
+
+            _audioCapture.OutputGain = (float)(AudioOutputGainPercent / 100.0);
+            _audioCapture.Start(SelectedAudioDevice.Id);
+        }
+        catch (Exception ex)
+        {
+            _suppressAudioApply = true;
+            try { AudioEnabled = false; }
+            finally { _suppressAudioApply = false; }
+            _audioCapture.Stop();
+            StatusText = $"Audio capture failed: {ex.Message}";
+        }
+    }
+
+    private void FlushAudioToNdi()
+    {
+        if (!AudioEnabled)
+            return;
+
+        var sender = _ndiOut;
+        bool send = NdiSending && sender is { IsActive: true };
+
+        int drained = 0;
+        while (drained < 8 && _audioCapture.TryDequeue(out var chunk))
+        {
+            if (send)
+                sender!.SendAudio(chunk.PlanarData, chunk.Channels, chunk.Samples, chunk.SampleRate);
+            drained++;
+        }
+    }
+
+    private void ApplyRoom3DSettings(LayoutDocument doc)
+    {
+        Room3DEnabled = doc.Room3DEnabled ?? false;
+        RoomAssembleT = Math.Clamp(doc.RoomAssembleT ?? 1f, 0f, 1f);
+        RoomPhotoOverlayEnabled = doc.RoomPhotoOverlayEnabled ?? false;
+        RoomPhotoOverlayOpacity = Math.Clamp(doc.RoomPhotoOverlayOpacity ?? 0.35f, 0f, 1f);
+        LoadRoomWallOffsets(doc.RoomWallOffsets);
+        if (_room3D is not null)
+        {
+            _room3D.AssembleT = (float)RoomAssembleT;
+            _room3D.PhotoOverlayEnabled = RoomPhotoOverlayEnabled;
+            _room3D.PhotoOverlayOpacity = (float)RoomPhotoOverlayOpacity;
+            ApplyRoomWallOffsetsToRenderer();
+        }
+    }
+
+    private static double NormalizeDegrees(double deg)
+    {
+        deg %= 360.0;
+        if (deg < 0) deg += 360.0;
+        return deg;
     }
 
     private void ApplyFloorReflectionSettings(LayoutDocument doc)
@@ -1199,6 +1618,170 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         FloorReflectionLength = Math.Clamp(doc.FloorReflectionLength ?? 0.4f, 0.05f, 1f);
         FloorReflectionAngle = Math.Clamp(doc.FloorReflectionAngle ?? 0.35f, 0f, 1f);
         FloorReflectionFadeStart = Math.Clamp(doc.FloorReflectionFadeStart ?? 0f, 0f, 1f);
+    }
+
+    private void LoadRoomPhotos(string assetsDir)
+    {
+        if (_room3D is null)
+            return;
+        _room3D.ClearPhotos();
+        var bgName = _pixelMap.BackgroundImage ?? "pixelmap.png";
+        var bgPath = Path.Combine(assetsDir, bgName);
+        if (!File.Exists(bgPath))
+        {
+            var png = Path.Combine(assetsDir, "pixelmap.png");
+            var jpg = Path.Combine(assetsDir, "pixelmap.jpg");
+            bgPath = File.Exists(png) ? png : jpg;
+        }
+
+        foreach (var zone in Zones)
+        {
+            string? single = zone.SingleImage;
+            if (!string.IsNullOrEmpty(single))
+            {
+                var path = Path.Combine(assetsDir, single.Replace('/', Path.DirectorySeparatorChar));
+                if (File.Exists(path))
+                {
+                    try { _room3D.LoadPhoto(zone.Id, path); continue; }
+                    catch { /* fall through to crop */ }
+                }
+            }
+            if (File.Exists(bgPath))
+            {
+                try { _room3D.LoadPhotoFromCrop(zone.Id, bgPath, zone); }
+                catch { /* optional */ }
+            }
+        }
+    }
+
+    [RelayCommand]
+    private void AssembleRoom3D()
+    {
+        _roomAssembleAnimating = true;
+        _roomAssembleAnimStart = DateTime.UtcNow;
+        _roomAssembleAnimFrom = RoomAssembleT;
+        _roomAssembleAnimTo = 1.0;
+    }
+
+    [RelayCommand]
+    private void ResetRoom3DCamera()
+    {
+        if (_room3D is null)
+            return;
+        _room3D.Camera = Room3DCamera.DefaultOrbit(_room3D.FloorWidth, _room3D.FloorHeight);
+    }
+
+    [RelayCommand]
+    private void ResetRoomWallOffsets()
+    {
+        _roomWallOffsets.Clear();
+        ApplyRoomWallOffsetsToRenderer();
+        StatusText = "Wall offsets reset";
+    }
+
+    partial void OnRoomWallEditModeChanged(bool value)
+    {
+        if (value)
+        {
+            Room3DEnabled = true;
+            ShowRoom3DPanel = true;
+            StatusText = "Edit wall positions: LMB drag wall · orbit on empty space";
+        }
+    }
+
+    private bool _suppressRoom3DRotSync;
+
+    [RelayCommand]
+    private void SetRoomContentRotation(object? parameter)
+    {
+        if (SelectedLayer is null || parameter is null) return;
+        double deg = parameter switch
+        {
+            double d => d,
+            float f => f,
+            int i => i,
+            string s when double.TryParse(s, out var v) => v,
+            _ => double.NaN
+        };
+        if (double.IsNaN(deg)) return;
+        SelectedLayer.Room3DRotationDegrees = (float)NormalizeDegrees(deg);
+        SyncRoom3DRotationFromSelection();
+    }
+
+    private void TickRoomAssembleAnimation()
+    {
+        if (!_roomAssembleAnimating)
+            return;
+        const double dur = 0.85;
+        double t = Math.Clamp((DateTime.UtcNow - _roomAssembleAnimStart).TotalSeconds / dur, 0, 1);
+        // smoothstep
+        double s = t * t * (3 - 2 * t);
+        RoomAssembleT = _roomAssembleAnimFrom + (_roomAssembleAnimTo - _roomAssembleAnimFrom) * s;
+        if (t >= 1)
+            _roomAssembleAnimating = false;
+    }
+
+    partial void OnRoomAssembleTChanged(double value)
+    {
+        if (_room3D is not null)
+            _room3D.AssembleT = (float)Math.Clamp(value, 0, 1);
+    }
+
+    partial void OnRoom3DEnabledChanged(bool value)
+    {
+        if (value && _room3D is not null)
+            _room3D.Camera = Room3DCamera.DefaultOrbit(_room3D.FloorWidth, _room3D.FloorHeight);
+    }
+
+    partial void OnRoomPhotoOverlayEnabledChanged(bool value)
+    {
+        if (_room3D is not null)
+            _room3D.PhotoOverlayEnabled = value;
+    }
+
+    partial void OnRoomPhotoOverlayOpacityChanged(double value)
+    {
+        if (_room3D is not null)
+            _room3D.PhotoOverlayOpacity = (float)Math.Clamp(value, 0, 1);
+    }
+
+    partial void OnRoomContentRotationChanged(double value)
+    {
+        if (_suppressRoom3DRotSync)
+            return;
+        double n = NormalizeDegrees(value);
+        if (Math.Abs(n - value) > 0.001)
+        {
+            RoomContentRotation = n;
+            return;
+        }
+
+        if (SelectedLayer is not null)
+            SelectedLayer.Room3DRotationDegrees = (float)n;
+    }
+
+    private void SyncRoom3DRotationFromSelection()
+    {
+        _suppressRoom3DRotSync = true;
+        try
+        {
+            RoomContentRotation = SelectedLayer is not null
+                ? NormalizeDegrees(SelectedLayer.Room3DRotationDegrees)
+                : 0;
+            RoomContentFlipVertical = SelectedLayer?.Room3DFlipVertical ?? false;
+        }
+        finally
+        {
+            _suppressRoom3DRotSync = false;
+        }
+    }
+
+    partial void OnRoomContentFlipVerticalChanged(bool value)
+    {
+        if (_suppressRoom3DRotSync)
+            return;
+        if (SelectedLayer is not null)
+            SelectedLayer.Room3DFlipVertical = value;
     }
 
     private void ApplyLayers(LayoutDocument doc)
@@ -1237,9 +1820,25 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             }
             catch { /* source may be offline */ }
 
-            var resolved = ResolveNativeSize(e.SourceKind, e.SourceKey, e.Name, runtime);
-            int nativeW = resolved.Width > 0 ? resolved.Width : Math.Max(e.NativeWidth, 1920);
-            int nativeH = resolved.Height > 0 ? resolved.Height : Math.Max(e.NativeHeight, 1080);
+            // Prefer live size, then the size saved in the layout — never invent 16:9 over saved dims.
+            int nativeW;
+            int nativeH;
+            if (runtime is { Width: > 0, Height: > 0 })
+            {
+                nativeW = runtime.Width;
+                nativeH = runtime.Height;
+            }
+            else if (e.NativeWidth > 0 && e.NativeHeight > 0)
+            {
+                nativeW = e.NativeWidth;
+                nativeH = e.NativeHeight;
+            }
+            else
+            {
+                var resolved = ResolveNativeSize(e.SourceKind, e.SourceKey, e.Name, runtime);
+                nativeW = resolved.Width > 0 ? resolved.Width : 1920;
+                nativeH = resolved.Height > 0 ? resolved.Height : 1080;
+            }
 
             Guid? groupId = null;
             if (!string.IsNullOrEmpty(e.GroupId) && Guid.TryParse(e.GroupId, out var parsed))
@@ -1268,6 +1867,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 Y = e.Y,
                 Scale = e.Scale,
                 RotationDegrees = e.RotationDegrees,
+                Room3DRotationDegrees = e.Room3DRotationDegrees,
+                Room3DFlipVertical = e.Room3DFlipVertical,
                 Opacity = Math.Clamp(e.Opacity, 0f, 1f),
                 ScaleMode = e.ScaleMode,
                 ZoneId = e.ZoneId,
@@ -1278,14 +1879,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                 ZIndex = e.ZIndex,
                 NativeWidth = nativeW,
                 NativeHeight = nativeH,
-                CropX = e.CropX,
-                CropY = e.CropY,
-                CropW = e.CropW,
-                CropH = e.CropH,
                 BlackKeyEnabled = e.BlackKeyEnabled,
                 BlackKeyThreshold = e.BlackKeyThreshold > 0 ? e.BlackKeyThreshold : 0.08f
             };
-            layer.SyncCropToNativeSize(e.NativeWidth, e.NativeHeight);
+            // W/H before X/Y — CropXMax depends on CropW.
+            layer.SetCrop(e.CropX, e.CropY, e.CropW, e.CropH);
+            // Only remap crop when the applied native size differs from what was saved.
+            if (nativeW != e.NativeWidth || nativeH != e.NativeHeight)
+                layer.SyncCropToNativeSize(e.NativeWidth, e.NativeHeight);
             layer.SnapDrawOpacity();
             Layers.Add(layer);
         }
@@ -1325,7 +1926,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         if (TryParseSizeFromDisplayName(displayName, out var pw, out var ph))
             return (pw, ph);
 
-        return (1920, 1080);
+        // Unknown — caller may fall back. Do not invent 16:9 during layout restore.
+        return (0, 0);
     }
 
     private static bool TryParseSizeFromDisplayName(string displayName, out int width, out int height)
@@ -1549,6 +2151,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         UpdateSelectedSourceHud();
         SyncSelectedTreeNode();
         SyncGroupChoiceFromLayer();
+        SyncRoom3DRotationFromSelection();
         if (value?.GroupId is Guid gid)
             SelectedGroup = Groups.FirstOrDefault(g => g.Id == gid);
         else if (SelectedTreeNode is not { IsGroup: true })
@@ -1556,6 +2159,14 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     }
 
     public bool HasSelectedLayer => SelectedLayer is not null;
+
+    public bool HasAnyToolPanel =>
+        ShowReflectionPanel || ShowLidarPanel || ShowNdiPanel || ShowRoom3DPanel;
+
+    partial void OnShowReflectionPanelChanged(bool value) => OnPropertyChanged(nameof(HasAnyToolPanel));
+    partial void OnShowLidarPanelChanged(bool value) => OnPropertyChanged(nameof(HasAnyToolPanel));
+    partial void OnShowNdiPanelChanged(bool value) => OnPropertyChanged(nameof(HasAnyToolPanel));
+    partial void OnShowRoom3DPanelChanged(bool value) => OnPropertyChanged(nameof(HasAnyToolPanel));
 
     private CompositionLayer? _hudLayer;
     private bool _suppressGroupChoiceAssign;
@@ -1573,11 +2184,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             UpdateSelectedSourceHud();
         }
 
-        if (e.PropertyName is nameof(CompositionLayer.CropX)
-            or nameof(CompositionLayer.CropY)
-            or nameof(CompositionLayer.CropW)
+        if (e.PropertyName is nameof(CompositionLayer.CropW)
             or nameof(CompositionLayer.CropH))
         {
+            // Size change only — pan (CropX/Y) must not re-center / re-scale the layer.
             RefitLayerIfZoned(SelectedLayer);
         }
     }
@@ -1656,6 +2266,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
 
         PresentPreview();
+        TickRoomAssembleAnimation();
 
         if (++_nicProbeTick >= 15)
         {
@@ -1666,6 +2277,25 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         }
 
         Fps = _renderFps;
+
+        if (AudioEnabled)
+        {
+            _audioCapture.TickPeakDecay();
+            AudioPeakL = Math.Clamp(_audioCapture.PeakL, 0, 1);
+            AudioPeakR = Math.Clamp(_audioCapture.PeakR, 0, 1);
+            _audioCapture.GetClipHold(out float holdL, out float holdR, out bool showL, out bool showR);
+            AudioClipHoldL = holdL;
+            AudioClipHoldR = holdR;
+            AudioClipVisibleL = showL;
+            AudioClipVisibleR = showR;
+        }
+        else if (AudioPeakL > 0 || AudioPeakR > 0 || AudioClipVisibleL || AudioClipVisibleR)
+        {
+            AudioPeakL = 0;
+            AudioPeakR = 0;
+            AudioClipVisibleL = false;
+            AudioClipVisibleR = false;
+        }
 
         var lidarStatus = _pendingLidarStatus;
         if (lidarStatus is not null)
@@ -1694,8 +2324,19 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
     private void ApplyFpsStatusText()
     {
         string head = CarouselBusy
-            ? $"Karussell {_wallCycleIndex + 1}/{WallCyclesPerRound} | Compose {_renderFps:0.0} | Preview {_previewFps:0.0} | Layers={Layers.Count}"
+            ? $"Carousel {_wallCycleIndex + 1}/{WallCyclesPerRound} | Compose {_renderFps:0.0} | Preview {_previewFps:0.0} | Layers={Layers.Count}"
             : $"Compose {_renderFps:0.0} | Preview {_previewFps:0.0} | Layers={Layers.Count}";
+
+        foreach (var layer in Layers)
+        {
+            if (layer.SourceKind != SourceKind.Browser) continue;
+            if (_hub.TryGet(layer.SourceKind, layer.SourceKey) is BrowserVideoSource browser)
+            {
+                head += $" | Browser {browser.CaptureMode}";
+                break;
+            }
+        }
+
         StatusText = head + Environment.NewLine + FormatActiveNdiStatus();
     }
 
@@ -1780,9 +2421,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     private void RenderLoop()
     {
-        // Match NDI SpeedHQ: compose and send both locked to NdiFrameSpec.TargetFps.
+        // Match NDI SpeedHQ: compose and send locked to NdiOutputFps (30 or 60).
         // Preview stays ≤30 Hz.
-        const double targetFrameMs = 1000.0 / NdiFrameSpec.TargetFps;
         var watch = System.Diagnostics.Stopwatch.StartNew();
         double nextMs = 0;
 
@@ -1804,6 +2444,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                     // keep loop alive; errors surface via StatusText on next successful frame
                 }
 
+                double targetFrameMs = 1000.0 / Math.Clamp(NdiOutputFps, 30, 60);
                 nextMs += targetFrameMs;
                 double nowMs = watch.Elapsed.TotalMilliseconds;
                 // Missed the slot: skip catch-up so we do not burst into the receiver.
@@ -1859,12 +2500,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                         layer.NativeWidth = src.Width;
                         layer.NativeHeight = src.Height;
                         layer.SyncCropToNativeSize(prevW, prevH);
-                        if (!CarouselBusy && layer.ZoneId is not null)
+                        // Fit/Fill may re-snap; Native must keep the saved X/Y/Scale from the layout.
+                        if (!CarouselBusy &&
+                            layer.ZoneId is not null &&
+                            layer.ScaleMode is ScaleMode.FitZone or ScaleMode.FillZone)
                         {
-                            var group = WallCarousel.ResolveGroup(layer.ZoneId);
-                            ZoneDefinition? zone = group is not null
-                                ? WallCarousel.BuildTargetZone(group.Value, Zones)
-                                : PixelMapLoader.FindZone(_pixelMap, layer.ZoneId);
+                            var zone = ResolveLayerZone(layer.ZoneId);
                             if (zone is not null)
                                 layer.ApplyZone(zone, layer.ScaleMode, applyZoneRotation: false);
                         }
@@ -1953,6 +2594,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
                     lock (_gpu.ContextLock)
                         _ndiOut.SendFrame(_compositor.CanvasTexture);
                 }
+                FlushAudioToNdi();
                 SendEnabledZoneStreams(_compositor.CanvasTexture);
             }
 
@@ -1961,7 +2603,27 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             {
                 _lastPreviewEmitQpc = System.Diagnostics.Stopwatch.GetTimestamp();
                 lock (_gpu.ContextLock)
-                    _compositor.EmitPreview(ShowBackgroundInPreview, LidarEnabled ? blobFrame : null);
+                {
+                    if (Room3DEnabled && _room3D is not null)
+                    {
+                        ID3D11ShaderResourceView? ResolveLive(CompositionLayer layer) =>
+                            _hub.TryGet(layer.SourceKind, layer.SourceKey)?.GetSrv();
+                        // Sample the normal compose canvas (West ribbon intact); 3D rot is mesh-only.
+                        var live = BuildRoomLiveDraws(ResolveLive);
+                        _room3D.AssembleT = (float)RoomAssembleT;
+                        _room3D.PhotoOverlayEnabled = RoomPhotoOverlayEnabled;
+                        _room3D.PhotoOverlayOpacity = (float)RoomPhotoOverlayOpacity;
+                        _compositor.EmitCustomPreview((rtv, w, h) =>
+                            _room3D.Render(
+                                rtv, w, h, live,
+                                _compositor.FloorMirrorSrv,
+                                _compositor.FloorBlobSrv));
+                    }
+                    else
+                    {
+                        _compositor.EmitPreview(ShowBackgroundInPreview, LidarEnabled ? blobFrame : null);
+                    }
+                }
                 _previewEmitCounter++;
             }
 
@@ -1992,9 +2654,264 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
         _renderExit = true;
         _timer.Stop();
+        _audioCapture.Stop();
         _ndiOut?.BeginShutdown();
         foreach (var item in NdiZoneStreams)
             item.Stream.BeginShutdown();
+    }
+
+    private List<RoomLiveDraw> BuildRoomLiveDraws(Func<CompositionLayer, ID3D11ShaderResourceView?> resolve)
+    {
+        var result = new List<RoomLiveDraw>();
+        if (_room3D is null || _compositor is null)
+            return result;
+
+        int canvasW = _compositor.CanvasWidth;
+        int canvasH = _compositor.CanvasHeight;
+        var canvasSrv = _compositor.CanvasSrv;
+        if (canvasSrv is null || canvasW <= 0 || canvasH <= 0)
+            return result;
+
+        foreach (var panel in _room3D.Panels)
+        {
+            if (panel.Kind == RoomPanelKind.Floor)
+                continue;
+            var zone = Zones.FirstOrDefault(z => z.Id.Equals(panel.ZoneId, StringComparison.OrdinalIgnoreCase));
+            if (zone is null)
+                continue;
+            if (!ZoneHasComposedLayer(zone) && !ZoneHasBlackKeyLayer(zone))
+                continue;
+
+            // 3D-only spin / flip on the mesh; canvas/ribbon stay intact.
+            float rot = ResolveRoom3DRotationForZone(panel.ZoneId);
+            bool flipV = ResolveRoom3DFlipVerticalForZone(panel.ZoneId);
+            result.Add(MakeCanvasCropDraw(panel, zone, canvasSrv, canvasW, canvasH, rot, flipV));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// 3D-only content rotation. West 1–3 share one value so the ribbon turns together.
+    /// </summary>
+    private float ResolveRoom3DRotationForZone(string zoneId)
+    {
+        return ResolveRoom3DLayerForZone(zoneId)?.Room3DRotationDegrees ?? 0f;
+    }
+
+    private bool ResolveRoom3DFlipVerticalForZone(string zoneId)
+    {
+        return ResolveRoom3DLayerForZone(zoneId)?.Room3DFlipVertical ?? false;
+    }
+
+    private CompositionLayer? ResolveRoom3DLayerForZone(string zoneId)
+    {
+        if (WallCarousel.ResolveGroup(zoneId) == WallGroup.West)
+        {
+            CompositionLayer? westLayer = null;
+            if (SelectedLayer is not null &&
+                (WallCarousel.ResolveGroup(SelectedLayer.ZoneId) == WallGroup.West ||
+                 LayerOverlapsZone(SelectedLayer, zoneId)))
+            {
+                westLayer = SelectedLayer;
+            }
+
+            westLayer ??= Layers
+                .Where(l => l.IsLogicallyVisible && !WallCarousel.IsMovingCopy(l) &&
+                            WallCarousel.ResolveGroup(l.ZoneId) == WallGroup.West)
+                .OrderByDescending(l => l.ZIndex)
+                .FirstOrDefault();
+
+            return westLayer ?? FindBestLayerForZone(zoneId);
+        }
+
+        if (SelectedLayer is not null && LayerOverlapsZone(SelectedLayer, zoneId))
+            return SelectedLayer;
+
+        return FindBestLayerForZone(zoneId);
+    }
+
+    private bool LayerOverlapsZone(CompositionLayer layer, string zoneId)
+    {
+        if (layer.ZoneId is not null &&
+            layer.ZoneId.Equals(zoneId, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var zone = Zones.FirstOrDefault(z => z.Id.Equals(zoneId, StringComparison.OrdinalIgnoreCase));
+        if (zone is null)
+            return false;
+
+        if (WallCarousel.ResolveGroup(zoneId) == WallGroup.West &&
+            WallCarousel.ResolveGroup(layer.ZoneId) == WallGroup.West)
+        {
+            var (bx, by, bw, bh) = layer.GetMapBounds();
+            return bw > 1f && bh > 1f &&
+                   bx < zone.X + zone.Width && bx + bw > zone.X &&
+                   by < zone.Y + zone.Height && by + bh > zone.Y;
+        }
+
+        return false;
+    }
+
+    private bool ZoneHasBlackKeyLayer(ZoneDefinition zone)
+    {
+        foreach (var layer in Layers)
+        {
+            if (!layer.IsLogicallyVisible || WallCarousel.IsMovingCopy(layer) || !layer.BlackKeyEnabled)
+                continue;
+            if (layer.ZoneId is not null &&
+                layer.ZoneId.Equals(zone.Id, StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (WallCarousel.ResolveGroup(zone.Id) == WallGroup.West &&
+                WallCarousel.ResolveGroup(layer.ZoneId) == WallGroup.West)
+                return true;
+        }
+
+        return false;
+    }
+
+    private bool ZoneHasComposedLayer(ZoneDefinition zone)
+    {
+        foreach (var layer in Layers)
+        {
+            if (!layer.IsLogicallyVisible || WallCarousel.IsMovingCopy(layer))
+                continue;
+
+            if (layer.ZoneId is not null &&
+                layer.ZoneId.Equals(zone.Id, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            // West ribbon: one layer may be tagged wall_west_1 but still cover 2/3.
+            if (WallCarousel.ResolveGroup(zone.Id) == WallGroup.West &&
+                WallCarousel.ResolveGroup(layer.ZoneId) == WallGroup.West)
+            {
+                var (bx, by, bw, bh) = layer.GetMapBounds();
+                if (bw > 1f && bh > 1f &&
+                    bx < zone.X + zone.Width && bx + bw > zone.X &&
+                    by < zone.Y + zone.Height && by + bh > zone.Y)
+                    return true;
+            }
+
+            // Untagged / native place: still sample canvas if the layer sits on this zone.
+            if (string.IsNullOrEmpty(layer.ZoneId))
+            {
+                var (bx, by, bw, bh) = layer.GetMapBounds();
+                if (bw > 1f && bh > 1f &&
+                    bx < zone.X + zone.Width && bx + bw > zone.X &&
+                    by < zone.Y + zone.Height && by + bh > zone.Y)
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private RoomLiveDraw MakeCanvasCropDraw(
+        RoomPanel panel,
+        ZoneDefinition zone,
+        ID3D11ShaderResourceView canvasSrv,
+        int canvasW,
+        int canvasH,
+        float contentRotationDegrees,
+        bool flipVertical)
+    {
+        WallFloorMapping.GetRoom3DCanvasUv(
+            zone, canvasW, canvasH,
+            out var uvMin, out var uvMax, out int orient);
+
+        if (flipVertical)
+            (uvMin.Y, uvMax.Y) = (uvMax.Y, uvMin.Y);
+
+        return new RoomLiveDraw
+        {
+            ZoneId = panel.ZoneId,
+            Srv = canvasSrv,
+            ContentRotationDegrees = contentRotationDegrees,
+            Opacity = 1f,
+            UvMin = uvMin,
+            UvMax = uvMax,
+            ScaleMode = ScaleMode.FillZone,
+            SourceW = canvasW,
+            SourceH = canvasH,
+            PanelContentW = panel.ContentWidth,
+            PanelContentH = panel.ContentHeight,
+            UseTexAlpha = true,
+            CanvasOrient = orient,
+            SourcePremultiplied = true,
+            SortOrder = 0
+        };
+    }
+
+    private static RoomLiveDraw MakeLiveDraw(
+        RoomPanel panel,
+        ID3D11ShaderResourceView srv,
+        CompositionLayer layer,
+        float u0, float v0, float u1, float v1,
+        float contentRot,
+        int canvasOrient)
+    {
+        var src = layer.GetSourcePixelSize();
+        // Browser/WebView has real alpha; Spout/NDI are often BGRX (alpha 0) — ignore their alpha.
+        bool useTexAlpha = layer.SourceKind == SourceKind.Browser;
+        return new RoomLiveDraw
+        {
+            ZoneId = panel.ZoneId,
+            Srv = srv,
+            ContentRotationDegrees = contentRot,
+            Opacity = Math.Clamp(layer.EffectiveDrawOpacity, 0f, 1f),
+            UvMin = new Vector2(u0, v0),
+            UvMax = new Vector2(u1, v1),
+            ScaleMode = layer.ScaleMode,
+            SourceW = src.Width,
+            SourceH = src.Height,
+            PanelContentW = panel.ContentWidth,
+            PanelContentH = panel.ContentHeight,
+            UseTexAlpha = useTexAlpha,
+            CanvasOrient = canvasOrient,
+            BlackKeyEnabled = layer.BlackKeyEnabled,
+            BlackKeyThreshold = layer.BlackKeyThreshold > 0 ? layer.BlackKeyThreshold : 0.08f,
+            SortOrder = layer.ZIndex
+        };
+    }
+
+    private CompositionLayer? FindBestLayerForZone(string zoneId)
+    {
+        var visible = Layers
+            .Where(l => l.IsLogicallyVisible && !WallCarousel.IsMovingCopy(l))
+            .ToList();
+
+        // Exact zone match first (West 2 must not steal layers snapped to West 1/3).
+        var exact = visible
+            .Where(l =>
+                l.ZoneId is not null &&
+                l.ZoneId.Equals(zoneId, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(l => l.SourceKind == SourceKind.Spout)
+            .ThenByDescending(l => l.ZIndex)
+            .FirstOrDefault();
+        if (exact is not null)
+            return exact;
+
+        // West ribbon fallback: a layer tagged to another West panel that still overlaps this one
+        // (carousel / full-ribbon content spanning West 1–3).
+        if (WallCarousel.ResolveGroup(zoneId) != WallGroup.West)
+            return null;
+
+        var zone = Zones.FirstOrDefault(z => z.Id.Equals(zoneId, StringComparison.OrdinalIgnoreCase));
+        if (zone is null)
+            return null;
+
+        return visible
+            .Where(l => WallCarousel.ResolveGroup(l.ZoneId) == WallGroup.West)
+            .Where(l =>
+            {
+                var (bx, by, bw, bh) = l.GetMapBounds();
+                return bw > 1f && bh > 1f &&
+                       bx < zone.X + zone.Width && bx + bw > zone.X &&
+                       by < zone.Y + zone.Height && by + bh > zone.Y;
+            })
+            .OrderByDescending(l => l.SourceKind == SourceKind.Spout)
+            .ThenByDescending(l => l.ZIndex)
+            .FirstOrDefault();
     }
 
     public void OnPreviewMouseDown(Point canvasPixel, bool startDrag)
@@ -2006,6 +2923,17 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             PlacingLidarSensor = false;
             SyncLidarServiceSettings(Zones.FirstOrDefault(z => z.Id.Equals("floor", StringComparison.OrdinalIgnoreCase)));
             return;
+        }
+
+        if (Room3DEnabled)
+            return; // handled via OnRoom3DMouse*
+
+        // Source selected → click wall to insert and clear source selection.
+        if (SelectedSource is not null)
+        {
+            var wall = FindWallZoneAtMapPoint(canvasPixel.X, canvasPixel.Y);
+            if (wall is not null && TryPlaceSelectedSourceOnWall(wall))
+                return;
         }
 
         CompositionLayer? hit = null;
@@ -2035,6 +2963,8 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     public void OnPreviewMouseMove(Point canvasPixel)
     {
+        if (Room3DEnabled)
+            return;
         if (!_isDragging || _dragLayer is null) return;
         lock (_renderLock)
         {
@@ -2047,8 +2977,278 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
     public void OnPreviewMouseUp()
     {
+        if (_isDragging && _dragLayer is not null)
+        {
+            var layer = _dragLayer;
+            float moved = MathF.Abs(layer.X - _dragStartX) + MathF.Abs(layer.Y - _dragStartY);
+            if (moved > 4f && AutoSnapEnabled)
+                TryAutoSnapLayerToWall(layer);
+        }
+
         _isDragging = false;
         _dragLayer = null;
+    }
+
+    partial void OnAutoSnapEnabledChanged(bool value)
+    {
+        StatusText = value
+            ? "Auto-snap on — drop/place on a wall fits the zone"
+            : "Auto-snap off — place on a wall keeps original size";
+    }
+
+    /// <summary>
+    /// When a dragged layer ends near a wall zone edge/interior, snap it into that wall
+    /// (West 1/2/3 individually, East, South, Stage, North) like manual Zone snap.
+    /// </summary>
+    private const float WallLayoutSnapPaddingPx = 140f;
+
+    private void TryAutoSnapLayerToWall(CompositionLayer layer)
+    {
+        var target = FindNearestWallSnapTarget(layer);
+        if (target is null)
+            return;
+
+        var mode = SelectedScaleMode == ScaleMode.Native
+            ? ScaleMode.FitZone
+            : SelectedScaleMode;
+
+        lock (_renderLock)
+            layer.ApplyZone(target, mode);
+
+        SelectedZone = Zones.FirstOrDefault(z => z.Id.Equals(target.Id, StringComparison.OrdinalIgnoreCase))
+                       ?? SelectedZone;
+        SelectedLayer = layer;
+        OnPropertyChanged(nameof(SelectedLayer));
+        StatusText = $"Snapped to {target.Name}";
+    }
+
+    private ZoneDefinition? FindNearestWallSnapTarget(CompositionLayer layer)
+    {
+        var (bx, by, bw, bh) = layer.GetMapBounds();
+        if (bw < 1f || bh < 1f)
+            return null;
+
+        float lcx = bx + bw * 0.5f;
+        float lcy = by + bh * 0.5f;
+
+        ZoneDefinition? best = null;
+        float bestScore = float.MaxValue;
+
+        foreach (var zone in EnumerateWallSnapZones())
+        {
+            float pad = WallLayoutSnapPaddingPx;
+            float zx0 = zone.X - pad;
+            float zy0 = zone.Y - pad;
+            float zx1 = zone.X + zone.Width + pad;
+            float zy1 = zone.Y + zone.Height + pad;
+
+            // Center must be near the zone (inside padded rect), or AABBs must overlap.
+            bool centerNear = lcx >= zx0 && lcx <= zx1 && lcy >= zy0 && lcy <= zy1;
+            bool overlap =
+                bx < zone.X + zone.Width + pad &&
+                bx + bw > zone.X - pad &&
+                by < zone.Y + zone.Height + pad &&
+                by + bh > zone.Y - pad;
+            if (!centerNear && !overlap)
+                continue;
+
+            float zcx = zone.X + zone.Width * 0.5f;
+            float zcy = zone.Y + zone.Height * 0.5f;
+            float dx = lcx - zcx;
+            float dy = lcy - zcy;
+            float dist = MathF.Sqrt(dx * dx + dy * dy);
+
+            // Prefer stronger geometric overlap (negative when centers align inside zone).
+            float ox0 = MathF.Max(bx, zone.X);
+            float oy0 = MathF.Max(by, zone.Y);
+            float ox1 = MathF.Min(bx + bw, zone.X + zone.Width);
+            float oy1 = MathF.Min(by + bh, zone.Y + zone.Height);
+            float overlapArea = MathF.Max(0, ox1 - ox0) * MathF.Max(0, oy1 - oy0);
+            float layerArea = MathF.Max(1f, bw * bh);
+            float score = dist - overlapArea / layerArea * 400f;
+
+            if (score < bestScore)
+            {
+                bestScore = score;
+                best = zone;
+            }
+        }
+
+        return best;
+    }
+
+    private IEnumerable<ZoneDefinition> EnumerateWallSnapZones()
+    {
+        foreach (var z in Zones)
+        {
+            if (z.Id.Equals("floor", StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (z.Id.StartsWith("wall_", StringComparison.OrdinalIgnoreCase))
+                yield return z;
+        }
+    }
+
+    /// <summary>Preview-local pixel coords (0..PreviewHost size), not canvas map pixels.</summary>
+    public void OnRoom3DMouseDown(Point previewPixel, double hostW, double hostH, bool leftButton, bool rightButton, bool shift)
+    {
+        if (!Room3DEnabled || _room3D is null || hostW < 1 || hostH < 1)
+            return;
+
+        _roomLastMouse = previewPixel;
+        _roomDragMouseStart = previewPixel;
+        _roomMovedEnough = false;
+        float ndcX = (float)(previewPixel.X / hostW * 2.0 - 1.0);
+        float ndcY = (float)(1.0 - previewPixel.Y / hostH * 2.0);
+        float aspect = (float)(hostW / hostH);
+
+        // Source selected → click wall to insert and clear source selection.
+        if (leftButton && SelectedSource is not null &&
+            _room3D.TryPick(ndcX, ndcY, aspect, out var placeZoneId))
+        {
+            var target = ResolveWallSnapTargetFromZoneId(placeZoneId);
+            if (target is not null && TryPlaceSelectedSourceOnWall(target))
+                return;
+        }
+
+        // Edit mode or Shift+LMB on wall: select + drag wall. Otherwise orbit.
+        bool wantWallEdit = leftButton && (RoomWallEditMode || shift);
+        if (wantWallEdit && _room3D.TryPick(ndcX, ndcY, aspect, out var zoneId))
+        {
+            SelectRoomZone(zoneId);
+            var panel = _room3D.FindPanel(zoneId);
+            if (panel is not null && panel.Kind == RoomPanelKind.Wall)
+            {
+                _roomWallDragging = true;
+                _roomDragZoneId = zoneId;
+                _roomDragStartOffset = panel.Offset;
+                return;
+            }
+
+            // Edit mode but empty space / floor: fall through to orbit (no Shift required).
+            if (RoomWallEditMode && !shift)
+            {
+                if (leftButton)
+                {
+                    _roomOrbiting = true;
+                    return;
+                }
+            }
+        }
+
+        if (leftButton && !shift && !RoomWallEditMode && _room3D.TryPick(ndcX, ndcY, aspect, out var pickId))
+            SelectRoomZone(pickId);
+
+        if (leftButton)
+        {
+            _roomOrbiting = true;
+            return;
+        }
+
+        if (rightButton)
+            _roomPanning = true;
+    }
+
+    private void SelectRoomZone(string zoneId)
+    {
+        var zone = Zones.FirstOrDefault(z => z.Id.Equals(zoneId, StringComparison.OrdinalIgnoreCase));
+        if (zone is not null)
+            SelectedZone = zone;
+        var layer = FindBestLayerForZone(zoneId);
+        if (layer is not null)
+            SelectedLayer = layer;
+    }
+
+    public void OnRoom3DMouseMove(Point previewPixel, double hostW, double hostH)
+    {
+        if (!Room3DEnabled || _room3D is null)
+            return;
+
+        double dx = previewPixel.X - _roomLastMouse.X;
+        double dy = previewPixel.Y - _roomLastMouse.Y;
+        _roomLastMouse = previewPixel;
+
+        if (!_roomMovedEnough)
+        {
+            double total = Math.Abs(previewPixel.X - _roomDragMouseStart.X)
+                           + Math.Abs(previewPixel.Y - _roomDragMouseStart.Y);
+            if (total > 3)
+                _roomMovedEnough = true;
+        }
+
+        if (_roomWallDragging && _roomDragZoneId is not null)
+        {
+            var panel = _room3D.FindPanel(_roomDragZoneId);
+            if (panel is not null)
+            {
+                float scale = _room3D.Camera.Distance / 800f;
+                panel.Offset = _roomDragStartOffset + new Vector2((float)dx * scale, (float)dy * scale);
+                _roomDragStartOffset = panel.Offset;
+            }
+            return;
+        }
+
+        if (_roomOrbiting)
+        {
+            var cam = _room3D.Camera;
+            const float sens = 0.01f;
+            _room3D.ApplyCamera(cam with
+            {
+                Yaw = cam.Yaw + (float)dx * sens,
+                Pitch = cam.Pitch + (float)dy * sens
+            });
+            return;
+        }
+
+        if (_roomPanning)
+        {
+            var cam = _room3D.Camera;
+            float scale = cam.Distance * 0.002f;
+            float cy = MathF.Cos(cam.Yaw);
+            float sy = MathF.Sin(cam.Yaw);
+            var right = new Vector3(cy, 0, -sy);
+            var forward = new Vector3(sy, 0, cy);
+            _room3D.ApplyCamera(cam with
+            {
+                Target = cam.Target - right * (float)dx * scale + forward * (float)dy * scale
+            });
+        }
+    }
+
+    public void OnRoom3DMouseUp()
+    {
+        if (_roomWallDragging && _roomDragZoneId is not null && _room3D is not null)
+        {
+            var panel = _room3D.FindPanel(_roomDragZoneId);
+            if (panel is not null)
+            {
+                RoomGeometry.SnapPanel(panel, _room3D.Panels, (float)RoomAssembleT);
+                StoreRoomWallOffset(_roomDragZoneId, panel.Offset);
+            }
+        }
+        _roomOrbiting = false;
+        _roomPanning = false;
+        _roomWallDragging = false;
+        _roomDragZoneId = null;
+    }
+
+    public void OnRoom3DMouseWheel(int delta)
+    {
+        if (!Room3DEnabled || _room3D is null)
+            return;
+        var cam = _room3D.Camera;
+        float factor = delta > 0 ? 0.9f : 1.1f;
+        _room3D.ApplyCamera(cam with
+        {
+            Distance = cam.Distance * factor
+        });
+    }
+
+    public void OnRoom3DKeyDown(Key key)
+    {
+        if (!Room3DEnabled)
+            return;
+        if (key == Key.R)
+            ResetRoom3DCamera();
     }
 
     partial void OnOutputNameChanged(string value)
@@ -2093,13 +3293,13 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         RecreateNdiSender(OutputName);
         if (!NdiAdapterBinding.LastAccessManagerWriteOk)
         {
-            StatusText = "NDI-Adapter: Config im Programmordner nicht geschrieben.";
+            StatusText = "NDI adapter: config was not written to the program folder.";
             return;
         }
 
         StatusText = value.IsAutomatic
-            ? "NDI-Config (Programm\\NDI): automatisch — alle Karten"
-            : $"NDI-Config (Programm\\NDI): {value.DisplayName}";
+            ? "NDI config (program\\NDI): automatic — all adapters"
+            : $"NDI config (program\\NDI): {value.DisplayName}";
     }
 
     private void SelectNdiAdapter(string? id, string? ipv4, bool recreateSender)
@@ -2114,11 +3314,11 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         _ndiAdapterReady = true;
 
         if (!NdiAdapterBinding.LastAccessManagerWriteOk)
-            StatusText = "NDI-Adapter: Config im Programmordner nicht geschrieben.";
+            StatusText = "NDI adapter: config was not written to the program folder.";
         else if (SelectedNdiAdapter.IsAutomatic)
-            StatusText = "NDI-Config (Programm\\NDI): automatisch — alle Karten";
+            StatusText = "NDI config (program\\NDI): automatic — all adapters";
         else
-            StatusText = $"NDI-Config (Programm\\NDI): {SelectedNdiAdapter.DisplayName}";
+            StatusText = $"NDI config (program\\NDI): {SelectedNdiAdapter.DisplayName}";
 
         if (recreateSender && _gpu is not null)
             RecreateNdiSender(OutputName);
@@ -2158,13 +3358,24 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         if (_gpu is null || _pixelMap.CanvasWidth <= 0)
             return;
 
+        var (outW, outH) = ComputeNdiOutputSize();
+        UpdateNdiOutputSizeLabel(outW, outH);
+        int fps = NdiOutputSender.NormalizeFps(NdiOutputFps);
+
         var ndiName = name ?? OutputName;
+        // Recreate only when size, fps, or name changed.
+        if (_ndiOut is { IsActive: true } &&
+            _ndiOut.OutputWidth == outW &&
+            _ndiOut.OutputHeight == outH &&
+            _ndiOut.FrameRate == fps &&
+            string.Equals(_ndiOut.Name, ndiName, StringComparison.Ordinal))
+            return;
+
         StopFullFrameNdiSender();
         try
         {
-            _ndiOut = NdiOutputSender.CreateFullFrame(
-                _gpu, ndiName, _pixelMap.CanvasWidth, _pixelMap.CanvasHeight);
-            _ndiOut.Initialize(_pixelMap.CanvasWidth, _pixelMap.CanvasHeight);
+            _ndiOut = NdiOutputSender.CreateFullFrame(_gpu, ndiName, outW, outH, fps);
+            _ndiOut.Initialize(outW, outH);
         }
         catch (Exception ex)
         {
@@ -2172,6 +3383,43 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             NdiSending = false;
             StatusText = $"NDI init failed: {ex.Message}";
         }
+    }
+
+    private (int Width, int Height) ComputeNdiOutputSize()
+    {
+        int canvasW = Math.Max(2, _pixelMap.CanvasWidth);
+        int canvasH = Math.Max(1, _pixelMap.CanvasHeight);
+        double pct = Math.Clamp(NdiOutputScalePercent, 10, 100) / 100.0;
+        int w = (int)Math.Round(canvasW * pct);
+        int h = (int)Math.Round(canvasH * pct);
+        if ((w & 1) != 0) w--; // UYVY requires even width
+        w = Math.Max(2, w);
+        h = Math.Max(1, h);
+        return (w, h);
+    }
+
+    private void UpdateNdiOutputSizeLabel(int w, int h) =>
+        NdiOutputSizeLabel = $"{w}×{h}";
+
+    partial void OnNdiOutputScalePercentChanged(double value)
+    {
+        var (w, h) = ComputeNdiOutputSize();
+        UpdateNdiOutputSizeLabel(w, h);
+        if (NdiSending && _gpu is not null)
+            EnsureFullFrameNdiSender(OutputName);
+    }
+
+    partial void OnNdiOutputFpsChanged(int value)
+    {
+        int fps = NdiOutputSender.NormalizeFps(value);
+        if (fps != value)
+        {
+            NdiOutputFps = fps;
+            return;
+        }
+
+        if (_gpu is not null)
+            RecreateNdiSender(OutputName);
     }
 
     private void StopFullFrameNdiSender()
@@ -2297,12 +3545,12 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
 
                 try
                 {
-                    item.Stream.EnsureStarted(OutputName);
+                    item.Stream.EnsureStarted(OutputName, NdiOutputFps);
                 }
                 catch (Exception ex)
                 {
                     item.Enabled = false;
-                    StatusText = $"Zonen-NDI {item.Stream.DisplayName}: {ex.Message}";
+                    StatusText = $"Zone NDI {item.Stream.DisplayName}: {ex.Message}";
                 }
             }
         }
@@ -2355,8 +3603,10 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
             item.Stream.Dispose();
         NdiZoneStreams.Clear();
         _ndiOut?.Dispose();
+        _room3D?.Dispose();
         _compositor?.Dispose();
         _hub.Dispose();
+        _audioCapture.Dispose();
         _ndiCatalog?.Dispose();
         _spoutCatalog?.Dispose();
         _gpu?.Dispose();

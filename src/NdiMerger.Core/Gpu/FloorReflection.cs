@@ -60,35 +60,14 @@ public readonly struct FloorReflectQuad
 /// Maps a wall layer onto the floor as a perspective reflection.
 /// Strips stay perpendicular to the wall; corners are mitred so neighbours
 /// meet on one cut and do not overlap. 90° room corners use 45°. West 1/2
-/// and West 2/3 use the real floor-edge angle. Stage is never reflected.
+/// and West 2/3 use the real floor-edge angle. West 3 and Ost end at the
+/// Stage wall edge. Stage is never reflected.
 /// </summary>
 public static class FloorReflection
 {
     // Neighbour stubs only drive OffsetPolyMiter. Zero-travel stub segments
     // are skipped, so the strip itself stays axis-aligned / along West 2.
-    // West outline is BuildWestFloorPoly (West 2 length along the diagonal).
-    private static readonly Vector2[] SudPoly =
-    [
-        new(4326, 1200), // West stub → 45° at NW
-        new(1100, 1200), // West / Süd
-        new(1100, 4598), // Süd / Ost
-        new(6838, 4598), // Ost stub → 45° at SW
-    ];
-
-    private static readonly Vector2[] OstPoly =
-    [
-        new(1100, 1200), // Süd stub → 45° at SW
-        new(1100, 4598), // Süd / Ost
-        new(6838, 4598), // Ost / Nord
-        new(6838, 3306), // Nord stub → 45° at SE
-    ];
-
-    private static readonly Vector2[] NordPoly =
-    [
-        new(1100, 4598), // Ost stub → 45° at SE
-        new(6838, 4598), // Ost / Nord
-        new(6838, 3306), // Nord / stage (straight)
-    ];
+    // West / Ost / Sud / Nord outlines are built from zones (stage.X = east edge).
 
     public static void GetWestFloorKinks(
         ZoneDefinition floor,
@@ -101,16 +80,28 @@ public static class FloorReflection
         uvB = ToFloorUv(poly[3], floor);
     }
 
+    private static float StageEdgeX(ZoneDefinition floor, IReadOnlyList<ZoneDefinition>? zones)
+    {
+        float stageX = floor.X + floor.Width;
+        if (zones is not null)
+        {
+            var stage = FindZone(zones, "wall_stage");
+            if (stage is not null)
+                stageX = stage.X;
+        }
+        return Math.Clamp(stageX, floor.X + 16f, floor.X + floor.Width);
+    }
+
     /// <summary>
-    /// Floor outline along West: West 1 horizontal, then West 2 as a diagonal
-    /// whose Euclidean length equals the West 2 panel, then West 3 horizontal
-    /// at its panel length up to the floor's east edge.
+    /// Floor outline along West: West 1 horizontal, West 2 diagonal to the
+    /// West 3 panel start, then West 3 horizontal to the Stage wall edge.
     /// </summary>
     public static Vector2[] BuildWestFloorPoly(ZoneDefinition floor, IReadOnlyList<ZoneDefinition>? zones = null)
     {
         float west2StartX = 4326f;
         float west2Len = 1866f;
-        float west3Len = 880f;
+        float west3StartX = 6192f;
+        float stageX = StageEdgeX(floor, zones);
         if (zones is not null)
         {
             var w1 = FindZone(zones, "wall_west_1");
@@ -126,23 +117,102 @@ public static class FloorReflection
                 west2StartX = w1.X + w1.Width;
             }
             if (w3 is not null)
-                west3Len = w3.ContentWidth > 0 ? w3.ContentWidth : w3.Width;
+                west3StartX = w3.X;
         }
 
-        float floorRight = floor.X + floor.Width;
         float floorTop = floor.Y;
-        west3Len = MathF.Min(west3Len, MathF.Max(8f, floorRight - west2StartX - 8f));
-        float dx = (floorRight - west3Len) - west2StartX;
-        dx = Math.Clamp(dx, 1f, west2Len);
-        float dy = MathF.Sqrt(MathF.Max(west2Len * west2Len - dx * dx, 0f));
+        west3StartX = Math.Clamp(west3StartX, west2StartX + 8f, stageX - 8f);
 
+        float dx = west3StartX - west2StartX;
+        float dy;
+        if (dx < west2Len - 1f)
+            dy = MathF.Sqrt(MathF.Max(west2Len * west2Len - dx * dx, 0f));
+        else
+            // Panel width equals the horizontal span: keep the measured room kink.
+            dy = MathF.Max(8f, west2Len * 0.486f);
+
+        float west3Y = floorTop + dy;
         return
         [
             new(floor.X, floor.Y + floor.Height),
             new(floor.X, floorTop),
             new(west2StartX, floorTop),
-            new(west2StartX + dx, floorTop + dy),
-            new(floorRight, floorTop + dy)
+            new(west3StartX, west3Y),
+            new(stageX, west3Y),
+            // Stage stub → 45° at West 3 / Stage
+            new(stageX, west3Y + MathF.Max(dy, 200f)),
+        ];
+    }
+
+    /// <summary>
+    /// Ost along the floor south edge, ending at the Stage wall (east edge).
+    /// </summary>
+    public static Vector2[] BuildOstFloorPoly(ZoneDefinition floor, IReadOnlyList<ZoneDefinition>? zones = null)
+    {
+        float stageX = StageEdgeX(floor, zones);
+        float bot = floor.Y + floor.Height;
+        float nordTop = floor.Y + floor.Height * 0.5f;
+        if (zones is not null)
+        {
+            var nord = FindZone(zones, "wall_nord");
+            var stage = FindZone(zones, "wall_stage");
+            if (nord is not null)
+                nordTop = nord.Y;
+            else if (stage is not null)
+                nordTop = stage.Y + stage.Height;
+        }
+
+        return
+        [
+            new(floor.X, floor.Y), // Süd stub → 45° at SW
+            new(floor.X, bot), // Süd / Ost
+            new(stageX, bot), // Ost / Stage (east wall)
+            // Stage/Nord stub up the east wall → 45° at SE
+            new(stageX, nordTop),
+        ];
+    }
+
+    public static Vector2[] BuildSudFloorPoly(ZoneDefinition floor, IReadOnlyList<ZoneDefinition>? zones = null)
+    {
+        float stageX = StageEdgeX(floor, zones);
+        float bot = floor.Y + floor.Height;
+        float west2StartX = 4326f;
+        if (zones is not null)
+        {
+            var w2 = FindZone(zones, "wall_west_2");
+            if (w2 is not null)
+                west2StartX = w2.X;
+        }
+
+        return
+        [
+            new(west2StartX, floor.Y), // West stub → 45° at NW
+            new(floor.X, floor.Y), // West / Süd
+            new(floor.X, bot), // Süd / Ost
+            new(stageX, bot), // Ost stub → 45° at SW (to Stage east edge)
+        ];
+    }
+
+    public static Vector2[] BuildNordFloorPoly(ZoneDefinition floor, IReadOnlyList<ZoneDefinition>? zones = null)
+    {
+        float stageX = StageEdgeX(floor, zones);
+        float bot = floor.Y + floor.Height;
+        float nordTop = floor.Y + floor.Height * 0.5f;
+        if (zones is not null)
+        {
+            var nord = FindZone(zones, "wall_nord");
+            var stage = FindZone(zones, "wall_stage");
+            if (nord is not null)
+                nordTop = nord.Y;
+            else if (stage is not null)
+                nordTop = stage.Y + stage.Height;
+        }
+
+        return
+        [
+            new(floor.X, bot), // Ost stub → 45° at SE
+            new(stageX, bot), // Ost / Nord at Stage east edge
+            new(stageX, nordTop), // Nord / Stage
         ];
     }
 
@@ -210,9 +280,9 @@ public static class FloorReflection
         return edge.Value switch
         {
             FloorReflectEdge.West => BuildAlongPoly(layer, BuildWestFloorPoly(floor, zones), edge.Value, alongY: false, flipU: false, flipV: false, offsetDist, vanishing, opacity),
-            FloorReflectEdge.Sud => BuildAlongPoly(layer, SudPoly, edge.Value, alongY: true, flipU: SudFlipU(layer), flipV: SudFlipV(layer), offsetDist, vanishing, opacity),
-            FloorReflectEdge.Ost => BuildAlongPoly(layer, OstPoly, edge.Value, alongY: false, flipU: true, flipV: false, offsetDist, vanishing, opacity),
-            FloorReflectEdge.Nord => BuildAlongPoly(layer, NordPoly, edge.Value, alongY: true, flipU: false, flipV: false, offsetDist, vanishing, opacity),
+            FloorReflectEdge.Sud => BuildAlongPoly(layer, BuildSudFloorPoly(floor, zones), edge.Value, alongY: true, flipU: SudFlipU(layer), flipV: SudFlipV(layer), offsetDist, vanishing, opacity),
+            FloorReflectEdge.Ost => BuildAlongPoly(layer, BuildOstFloorPoly(floor, zones), edge.Value, alongY: false, flipU: true, flipV: false, offsetDist, vanishing, opacity),
+            FloorReflectEdge.Nord => BuildAlongPoly(layer, BuildNordFloorPoly(floor, zones), edge.Value, alongY: true, flipU: false, flipV: false, offsetDist, vanishing, opacity),
             _ => []
         };
     }
@@ -495,13 +565,16 @@ public static class FloorReflection
             {
                 var west = BuildWestFloorPoly(floor);
                 a = west[1];
-                b = west[^1];
+                b = west[^2]; // Stage edge (before stub)
                 break;
             }
             case FloorReflectEdge.Ost:
-                a = new Vector2(l, bot);
-                b = new Vector2(r, bot);
+            {
+                var ost = BuildOstFloorPoly(floor);
+                a = ost[1];
+                b = ost[^2]; // Stage edge (before stub)
                 break;
+            }
             case FloorReflectEdge.Sud:
                 a = new Vector2(l, t);
                 b = new Vector2(l, bot);

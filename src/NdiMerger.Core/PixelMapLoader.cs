@@ -24,6 +24,7 @@ public static class PixelMapLoader
         if (map.CanvasWidth <= 0 || map.CanvasHeight <= 0)
             throw new InvalidDataException("Pixelmap canvas size is invalid.");
 
+        WallFloorMapping.ApplyCanonicalRotations(map.Zones);
         return map;
     }
 

@@ -32,6 +32,10 @@ internal struct LayerConstants
     public float BlackKeyEnabled;
     public float BlackKeyThreshold;
     public float BlackKeySoftness;
+    public float SourcePremultiplied;
+    public float Pad0;
+    public float Pad1;
+    public float Pad2;
     public Vector2 SourceUvMin;
     public Vector2 SourceUvMax;
 }
@@ -119,6 +123,11 @@ public sealed class PixelMapCompositor : IDisposable
     private readonly ID3D11RenderTargetView _canvasRtv;
     private readonly ID3D11ShaderResourceView _canvasSrv;
 
+    // 3D-only compose: same layout as the output canvas, but with Room3DRotationDegrees baked in.
+    private ID3D11Texture2D? _roomCanvasTexture;
+    private ID3D11RenderTargetView? _roomCanvasRtv;
+    private ID3D11ShaderResourceView? _roomCanvasSrv;
+
     private readonly ID3D11Texture2D _previewTexture;
     private readonly ID3D11RenderTargetView _previewRtv;
     // Preview CPU readback uses a dedicated D3D device (same adapter). Compose never Maps.
@@ -184,6 +193,7 @@ public sealed class PixelMapCompositor : IDisposable
     private int _backgroundWidth;
     private int _backgroundHeight;
 
+    /// <summary>Legacy; pixelmap is now drawn under layers / under the canvas blit.</summary>
     public const float OverlayOpacity = 0.5f;
 
     public int CanvasWidth => _canvasWidth;
@@ -196,6 +206,12 @@ public sealed class PixelMapCompositor : IDisposable
     public int PreviewGeneration => Volatile.Read(ref _previewGeneration);
     public ID3D11Texture2D CanvasTexture => _canvasTexture;
     public ID3D11ShaderResourceView CanvasSrv => _canvasSrv;
+    /// <summary>3D-only canvas (Room3DRotation baked). Valid after <see cref="RenderRoomCanvas"/>.</summary>
+    public ID3D11ShaderResourceView? RoomCanvasSrv => _roomCanvasSrv;
+    /// <summary>Floor-resolution mirror RT after the last <see cref="Render"/> (null if not drawn).</summary>
+    public ID3D11ShaderResourceView? FloorMirrorSrv { get; private set; }
+    /// <summary>Floor-resolution LiDAR blob RT after the last <see cref="Render"/> (null if not drawn).</summary>
+    public ID3D11ShaderResourceView? FloorBlobSrv { get; private set; }
     public GpuDevice Gpu => _gpu;
 
     public PixelMapCompositor(GpuDevice gpu, int canvasWidth, int canvasHeight, int previewMaxWidth = 1600)
@@ -278,7 +294,9 @@ public sealed class PixelMapCompositor : IDisposable
         blendDesc.RenderTarget[0] = new RenderTargetBlendDescription
         {
             BlendEnable = true,
-            SourceBlend = Blend.SourceAlpha,
+            // Premultiplied alpha: shaders output rgb*a so fade+black-key doesn't
+            // leave a black veil while DrawOpacity animates (esp. West walls).
+            SourceBlend = Blend.One,
             DestinationBlend = Blend.InverseSourceAlpha,
             BlendOperation = BlendOperation.Add,
             SourceBlendAlpha = Blend.One,
@@ -381,7 +399,8 @@ public sealed class PixelMapCompositor : IDisposable
         var ctx = _gpu.Context;
         ctx.OMSetRenderTargets(_canvasRtv);
         ctx.RSSetViewport(new Viewport(0, 0, _canvasWidth, _canvasHeight));
-        ctx.ClearRenderTargetView(_canvasRtv, new Color4(0, 0, 0, 1));
+        // Transparent clear so black-key holes stay alpha=0 (preview can show pixelmap underneath).
+        ctx.ClearRenderTargetView(_canvasRtv, new Color4(0, 0, 0, 0));
 
         BindLayerPipeline();
 
@@ -392,6 +411,10 @@ public sealed class PixelMapCompositor : IDisposable
         ctx.VSSetConstantBuffer(1, _layerCb);
         ctx.PSSetConstantBuffer(1, _layerCb);
 
+        // Pixelmap under layers when requested — keyed fades reveal it during the blend.
+        if (overlayOutput && HasBackground)
+            DrawTexturedQuad(0, 0, _backgroundWidth, _backgroundHeight, 0, 1f, _backgroundSrv!, useTexAlpha: true);
+
         var visible = layers.Where(l => l.IsEffectivelyVisible).OrderBy(l => l.ZIndex).ToList();
         var settings = reflection ?? FloorReflectionSettings.Default;
         var floor = zones?.FirstOrDefault(z => z.Id.Equals("floor", StringComparison.OrdinalIgnoreCase));
@@ -401,8 +424,12 @@ public sealed class PixelMapCompositor : IDisposable
         bool drawBlobs = blobSettings is { Enabled: true } && blobs is not null && floor is not null &&
                          (blobs.Blobs.Count > 0 || blobs.Trail.Count > 0);
 
+        FloorMirrorSrv = null;
+        FloorBlobSrv = null;
+
+        // Floor stays black under mirror/LiDAR (canvas already cleared to black).
         foreach (var layer in visible.Where(FloorReflection.IsFloorLayer))
-            DrawLayer(layer, resolveSrv, zones);
+            DrawLayer(layer, resolveSrv, zones, bakeRoom3DRotation: false);
 
         if (settings.Enabled && floor is not null)
             DrawFloorReflections(visible, resolveSrv, zones!, floor, settings);
@@ -418,23 +445,56 @@ public sealed class PixelMapCompositor : IDisposable
         ctx.VSSetConstantBuffer(1, _layerCb);
         ctx.PSSetConstantBuffer(1, _layerCb);
         foreach (var layer in visible.Where(l => !FloorReflection.IsFloorLayer(l)))
-            DrawLayer(layer, resolveSrv, zones);
+            DrawLayer(layer, resolveSrv, zones, bakeRoom3DRotation: false);
 
         if (drawWave)
             DrawFloorWave(floor!, zones!, waveSettings, drawBlobs ? blobs : null);
-
-        if (overlayOutput && HasBackground)
-        {
-            ctx.OMSetRenderTargets(_canvasRtv);
-            ctx.RSSetViewport(new Viewport(0, 0, _canvasWidth, _canvasHeight));
-            ctx.UpdateSubresource(new FrameConstants { ViewProjection = Matrix4x4.Transpose(vp) }, _frameCb);
-            DrawTexturedQuad(0, 0, _backgroundWidth, _backgroundHeight, 0, OverlayOpacity, _backgroundSrv!, useTexAlpha: true);
-        }
 
         // Unbind so NDI can sample the canvas as SRV and convert to UYVY.
         // Preview is emitted separately AFTER NDI (output-first).
         ctx.OMSetRenderTargets((ID3D11RenderTargetView)null!);
         ctx.PSSetShaderResource(0, null!);
+    }
+
+    /// <summary>
+    /// Compose a 3D-only canvas. Layers are drawn exactly as on the 2D/NDI canvas
+    /// (West ribbon intact). Room3DRotationDegrees is applied later on the mesh, not here.
+    /// </summary>
+    public void RenderRoomCanvas(
+        IReadOnlyList<CompositionLayer> layers,
+        Func<CompositionLayer, ID3D11ShaderResourceView?> resolveSrv,
+        IReadOnlyList<ZoneDefinition>? zones = null)
+    {
+        EnsureRoomCanvas();
+        var ctx = _gpu.Context;
+        ctx.OMSetRenderTargets(_roomCanvasRtv!);
+        ctx.RSSetViewport(new Viewport(0, 0, _canvasWidth, _canvasHeight));
+        ctx.ClearRenderTargetView(_roomCanvasRtv!, new Color4(0, 0, 0, 0));
+
+        BindLayerPipeline();
+        var vp = Matrix4x4.CreateOrthographicOffCenter(0, _canvasWidth, _canvasHeight, 0, 0, 1);
+        ctx.UpdateSubresource(new FrameConstants { ViewProjection = Matrix4x4.Transpose(vp) }, _frameCb);
+        ctx.VSSetConstantBuffer(0, _frameCb);
+        ctx.VSSetConstantBuffer(1, _layerCb);
+        ctx.PSSetConstantBuffer(1, _layerCb);
+
+        // Same draw as output canvas — no Room3DRotation bake (keeps West continuous).
+        var visible = layers.Where(l => l.IsEffectivelyVisible).OrderBy(l => l.ZIndex);
+        foreach (var layer in visible)
+            DrawLayer(layer, resolveSrv, zones, bakeRoom3DRotation: false);
+
+        ctx.OMSetRenderTargets((ID3D11RenderTargetView)null!);
+        ctx.PSSetShaderResource(0, null!);
+    }
+
+    private void EnsureRoomCanvas()
+    {
+        if (_roomCanvasTexture is not null)
+            return;
+
+        _roomCanvasTexture = _gpu.CreateTexture(_canvasWidth, _canvasHeight);
+        _roomCanvasRtv = _gpu.Device.CreateRenderTargetView(_roomCanvasTexture);
+        _roomCanvasSrv = _gpu.Device.CreateShaderResourceView(_roomCanvasTexture);
     }
 
     /// <summary>
@@ -450,14 +510,31 @@ public sealed class PixelMapCompositor : IDisposable
         var previewVp = Matrix4x4.CreateOrthographicOffCenter(0, PreviewWidth, PreviewHeight, 0, 0, 1);
         ctx.UpdateSubresource(new FrameConstants { ViewProjection = Matrix4x4.Transpose(previewVp) }, _frameCb);
         ctx.VSSetConstantBuffer(0, _frameCb);
-        DrawTexturedQuad(0, 0, PreviewWidth, PreviewHeight, 0, 1f, _canvasSrv);
 
+        // Pixelmap first, then canvas with alpha — black-key holes (and fades) reveal the map.
         if (overlayPreview && HasBackground)
-            DrawTexturedQuad(0, 0, PreviewWidth, PreviewHeight, 0, OverlayOpacity, _backgroundSrv!, useTexAlpha: true);
+            DrawTexturedQuad(0, 0, PreviewWidth, PreviewHeight, 0, 1f, _backgroundSrv!, useTexAlpha: true);
+
+        DrawTexturedQuad(0, 0, PreviewWidth, PreviewHeight, 0, 1f, _canvasSrv, sourcePremultiplied: true);
 
         if (blobs is not null && (blobs.DebugPoints.Count > 0 || blobs.DebugSensor is not null))
             DrawLidarDebugOverlay(blobs, previewVp);
 
+        FinishPreviewEmit();
+    }
+
+    /// <summary>
+    /// Custom 3D (or other) preview draw into the preview RT, then same readback path as <see cref="EmitPreview"/>.
+    /// </summary>
+    public void EmitCustomPreview(Action<ID3D11RenderTargetView, int, int> draw)
+    {
+        draw(_previewRtv, PreviewWidth, PreviewHeight);
+        FinishPreviewEmit();
+    }
+
+    private void FinishPreviewEmit()
+    {
+        var ctx = _gpu.Context;
         var shared = _previewSharedMain[_previewWrite];
         if (shared is not null)
         {
@@ -475,7 +552,8 @@ public sealed class PixelMapCompositor : IDisposable
     private void DrawLayer(
         CompositionLayer layer,
         Func<CompositionLayer, ID3D11ShaderResourceView?> resolveSrv,
-        IReadOnlyList<ZoneDefinition>? zones)
+        IReadOnlyList<ZoneDefinition>? zones,
+        bool bakeRoom3DRotation)
     {
         var srv = resolveSrv(layer);
         if (srv is null || layer.NativeWidth <= 0 || layer.NativeHeight <= 0)
@@ -483,8 +561,18 @@ public sealed class PixelMapCompositor : IDisposable
 
         float threshold = Math.Clamp(layer.BlackKeyThreshold, 0f, 1f);
         float softness = Math.Max(threshold * 0.35f, 0.001f);
+
+        float roomRot = bakeRoom3DRotation ? layer.Room3DRotationDegrees : 0f;
+        float drawRot = layer.RotationDegrees + roomRot;
+        drawRot %= 360f;
+        if (drawRot < 0) drawRot += 360f;
+        bool roomRotated = MathF.Abs(roomRot) > 0.01f;
+
+        // With room rotation, draw the whole layer as one rotated quad (skip West ribbon slices).
         var ribbon = new List<WallRibbonDraw>();
-        if (zones is not null && WallCarousel.TryBuildRibbonDraws(layer, zones, ribbon))
+        if (!roomRotated &&
+            zones is not null &&
+            WallCarousel.TryBuildRibbonDraws(layer, zones, ribbon))
         {
             foreach (var slice in ribbon)
             {
@@ -505,7 +593,7 @@ public sealed class PixelMapCompositor : IDisposable
         var size = layer.GetDrawSize();
         var (u0, v0, u1, v1) = layer.GetCropUvRect();
         DrawTexturedQuad(
-            layer.X, layer.Y, size.X, size.Y, layer.RotationDegrees, layer.EffectiveDrawOpacity, srv,
+            layer.X, layer.Y, size.X, size.Y, drawRot, layer.EffectiveDrawOpacity, srv,
             useTexAlpha: false,
             blackKeyEnabled: layer.BlackKeyEnabled,
             blackKeyThreshold: threshold,
@@ -771,6 +859,7 @@ public sealed class PixelMapCompositor : IDisposable
         ctx.PSSetConstantBuffer(1, _layerCb);
         DrawTexturedQuad(floor.X, floor.Y, floor.Width, floor.Height, 0, 1f, compositeSrv, useTexAlpha: true);
         ctx.PSSetShaderResource(0, null!);
+        FloorMirrorSrv = compositeSrv;
     }
 
     private void DrawFloorWave(
@@ -938,6 +1027,7 @@ public sealed class PixelMapCompositor : IDisposable
         ctx.VSSetConstantBuffer(1, _layerCb);
         ctx.PSSetConstantBuffer(1, _layerCb);
         DrawTexturedQuad(floor.X, floor.Y, floor.Width, floor.Height, 0, settings.Opacity, compositeSrv, useTexAlpha: true);
+        FloorBlobSrv = compositeSrv;
     }
 
     private void DrawBlobQuad(
@@ -1201,7 +1291,8 @@ public sealed class PixelMapCompositor : IDisposable
         float blackKeyThreshold = 0.08f,
         float blackKeySoftness = 0.03f,
         Vector2? sourceUvMin = null,
-        Vector2? sourceUvMax = null)
+        Vector2? sourceUvMax = null,
+        bool sourcePremultiplied = false)
     {
         var world =
             Matrix4x4.CreateScale(w, h, 1) *
@@ -1226,6 +1317,7 @@ public sealed class PixelMapCompositor : IDisposable
             BlackKeyEnabled = blackKeyEnabled ? 1f : 0f,
             BlackKeyThreshold = blackKeyThreshold,
             BlackKeySoftness = blackKeySoftness,
+            SourcePremultiplied = sourcePremultiplied ? 1f : 0f,
             SourceUvMin = sourceUvMin ?? Vector2.Zero,
             SourceUvMax = sourceUvMax ?? Vector2.One
         };
@@ -1251,6 +1343,10 @@ public sealed class PixelMapCompositor : IDisposable
                 float BlackKeyEnabled;
                 float BlackKeyThreshold;
                 float BlackKeySoftness;
+                float SourcePremultiplied;
+                float Pad0;
+                float Pad1;
+                float Pad2;
                 float2 SourceUvMin;
                 float2 SourceUvMax;
             };
@@ -1270,13 +1366,20 @@ public sealed class PixelMapCompositor : IDisposable
 
             float4 PSMain(VSOut i) : SV_Target {
                 float4 c = tex.Sample(samp, i.uv);
+                // Already-premultiplied blit (compose canvas → preview): keep rgb, scale by Color.a.
+                if (SourcePremultiplied > 0.5) {
+                    float a = c.a * Color.a;
+                    return float4(c.rgb * Color.rgb * Color.a, a);
+                }
                 float a = UseTexAlpha > 0.5 ? c.a * Color.a : Color.a;
                 if (BlackKeyEnabled > 0.5) {
                     float luma = max(c.r, max(c.g, c.b));
                     float soft = max(BlackKeySoftness, 0.001);
                     a *= smoothstep(BlackKeyThreshold, BlackKeyThreshold + soft, luma);
                 }
-                return float4(c.rgb * Color.rgb, a);
+                // Premultiplied RGB so opacity fades don't darken black-keyed regions.
+                float3 rgb = c.rgb * Color.rgb * a;
+                return float4(rgb, a);
             }
             """;
 
@@ -1382,7 +1485,8 @@ public sealed class PixelMapCompositor : IDisposable
                     alpha *= smoothstep(BlackKeyThreshold, BlackKeyThreshold + soft, luma);
                     if (alpha < 0.004) clip(-1);
                 }
-                return float4(c.rgb * Color.rgb, alpha);
+                float3 rgb = c.rgb * Color.rgb * alpha;
+                return float4(rgb, alpha);
             }
             """;
 
@@ -1498,7 +1602,7 @@ public sealed class PixelMapCompositor : IDisposable
                 float a = saturate(core + fill + rim + pulse) * Color.a;
                 // Brighten the core / rings slightly so edges read clearly on dark floors.
                 float3 rgb = Color.rgb * lerp(0.85, 1.15, saturate(core + rim + pulse));
-                return float4(rgb, a);
+                return float4(rgb * a, a);
             }
             """;
 
@@ -1727,7 +1831,7 @@ public sealed class PixelMapCompositor : IDisposable
                 rgb += blobBreak * foamCol * 0.22;
                 rgb = lerp(c0.rgb, rgb, floorMask);
 
-                return float4(rgb, Opacity);
+                return float4(rgb * Opacity, Opacity);
             }
             """;
 
@@ -1766,6 +1870,9 @@ public sealed class PixelMapCompositor : IDisposable
         DisposePreviewReadback();
         _previewRtv.Dispose();
         _previewTexture.Dispose();
+        _roomCanvasSrv?.Dispose();
+        _roomCanvasRtv?.Dispose();
+        _roomCanvasTexture?.Dispose();
         _canvasSrv.Dispose();
         _canvasRtv.Dispose();
         _canvasTexture.Dispose();

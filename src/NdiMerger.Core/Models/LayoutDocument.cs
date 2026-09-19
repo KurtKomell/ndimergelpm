@@ -11,9 +11,19 @@ public sealed class LayoutDocument
     public bool ShowBackgroundInPreview { get; set; } = true;
     public bool ShowLayerOverlays { get; set; } = true;
     public bool NdiSending { get; set; } = true;
+    /// <summary>Full-frame NDI output scale as percent of canvas (10–100). Width kept even for UYVY.</summary>
+    public double NdiOutputScalePercent { get; set; } = 100;
+    /// <summary>Full-frame and zone NDI / compose cadence: 30 or 60.</summary>
+    public int NdiOutputFps { get; set; } = 30;
     public List<string> EnabledNdiZoneIds { get; set; } = [];
     public string? NdiAdapterId { get; set; }
     public string? NdiAdapterIp { get; set; }
+    /// <summary>WASAPI capture device ID for NDI audio mux on the full-frame sender.</summary>
+    public string? AudioDeviceId { get; set; }
+    /// <summary>When true, capture the selected audio device and send on full-frame NDI.</summary>
+    public bool AudioEnabled { get; set; }
+    /// <summary>Ausgangslautstärke as percent of unity (0–200). Default 100.</summary>
+    public double AudioOutputGainPercent { get; set; } = 100;
     public ScaleMode SelectedScaleMode { get; set; } = ScaleMode.Native;
     public string? SelectedZoneId { get; set; }
     public string? SelectedLayerKey { get; set; }
@@ -26,9 +36,21 @@ public sealed class LayoutDocument
     public float? FloorReflectionLength { get; set; }
     public float? FloorReflectionAngle { get; set; }
     public float? FloorReflectionFadeStart { get; set; }
+    public bool? Room3DEnabled { get; set; }
+    public float? RoomAssembleT { get; set; }
+    public bool? RoomPhotoOverlayEnabled { get; set; }
+    public float? RoomPhotoOverlayOpacity { get; set; }
+    public List<RoomWallOffsetEntry> RoomWallOffsets { get; set; } = [];
     public LidarSettings? Lidar { get; set; }
     public List<LayoutGroupEntry> Groups { get; set; } = [];
     public List<LayoutLayerEntry> Layers { get; set; } = [];
+}
+
+public sealed class RoomWallOffsetEntry
+{
+    public string ZoneId { get; set; } = "";
+    public float OffsetX { get; set; }
+    public float OffsetZ { get; set; }
 }
 
 public sealed class AppSession
@@ -60,6 +82,10 @@ public sealed class LayoutLayerEntry
     public float Y { get; set; }
     public float Scale { get; set; } = 1f;
     public float RotationDegrees { get; set; }
+    /// <summary>3D-only wall content rotation for this layer.</summary>
+    public float Room3DRotationDegrees { get; set; }
+    /// <summary>3D-only top↔bottom UV flip for this layer.</summary>
+    public bool Room3DFlipVertical { get; set; }
     public float Opacity { get; set; } = 1f;
     public ScaleMode ScaleMode { get; set; } = ScaleMode.Native;
     public string? ZoneId { get; set; }
@@ -98,6 +124,8 @@ public static class LayoutSerializer
         bool showBgPreview = true,
         bool showLayerOverlays = true,
         bool ndiSending = true,
+        double ndiOutputScalePercent = 100,
+        int ndiOutputFps = 30,
         ScaleMode selectedScaleMode = ScaleMode.Native,
         string? selectedZoneId = null,
         string? selectedLayerKey = null,
@@ -113,7 +141,15 @@ public static class LayoutSerializer
         LidarSettings? lidar = null,
         string? ndiAdapterId = null,
         string? ndiAdapterIp = null,
-        IEnumerable<string>? enabledNdiZoneIds = null)
+        IEnumerable<string>? enabledNdiZoneIds = null,
+        bool room3DEnabled = false,
+        float roomAssembleT = 1f,
+        bool roomPhotoOverlayEnabled = false,
+        float roomPhotoOverlayOpacity = 0.35f,
+        IEnumerable<RoomWallOffsetEntry>? roomWallOffsets = null,
+        string? audioDeviceId = null,
+        bool audioEnabled = false,
+        double audioOutputGainPercent = 100)
     {
         return new LayoutDocument
         {
@@ -123,9 +159,14 @@ public static class LayoutSerializer
             ShowBackgroundInPreview = showBgPreview,
             ShowLayerOverlays = showLayerOverlays,
             NdiSending = ndiSending,
+            NdiOutputScalePercent = Math.Clamp(ndiOutputScalePercent, 10, 100),
+            NdiOutputFps = ndiOutputFps >= 45 ? 60 : 30,
             EnabledNdiZoneIds = enabledNdiZoneIds?.ToList() ?? [],
             NdiAdapterId = ndiAdapterId,
             NdiAdapterIp = ndiAdapterIp,
+            AudioDeviceId = audioDeviceId,
+            AudioEnabled = audioEnabled,
+            AudioOutputGainPercent = Math.Clamp(audioOutputGainPercent <= 0 ? 100 : audioOutputGainPercent, 0, 200),
             SelectedScaleMode = selectedScaleMode,
             SelectedZoneId = selectedZoneId,
             SelectedLayerKey = selectedLayerKey,
@@ -138,6 +179,19 @@ public static class LayoutSerializer
             FloorReflectionLength = floorReflectionLength,
             FloorReflectionAngle = floorReflectionAngle,
             FloorReflectionFadeStart = floorReflectionFadeStart,
+            Room3DEnabled = room3DEnabled,
+            RoomAssembleT = roomAssembleT,
+            RoomPhotoOverlayEnabled = roomPhotoOverlayEnabled,
+            RoomPhotoOverlayOpacity = roomPhotoOverlayOpacity,
+            RoomWallOffsets = roomWallOffsets?
+                .Where(e => !string.IsNullOrWhiteSpace(e.ZoneId))
+                .Select(e => new RoomWallOffsetEntry
+                {
+                    ZoneId = e.ZoneId,
+                    OffsetX = e.OffsetX,
+                    OffsetZ = e.OffsetZ
+                })
+                .ToList() ?? [],
             Lidar = lidar,
             Groups = groups.OrderBy(g => g.SortOrder).Select(g => new LayoutGroupEntry
             {
@@ -157,6 +211,8 @@ public static class LayoutSerializer
                 Y = l.Y,
                 Scale = l.Scale,
                 RotationDegrees = l.RotationDegrees,
+                Room3DRotationDegrees = l.Room3DRotationDegrees,
+                Room3DFlipVertical = l.Room3DFlipVertical,
                 Opacity = l.Opacity,
                 ScaleMode = l.ScaleMode,
                 ZoneId = l.ZoneId,

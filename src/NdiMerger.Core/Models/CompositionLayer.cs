@@ -32,6 +32,30 @@ public sealed class CompositionLayer : INotifyPropertyChanged
     private float _rotationDegrees;
     public float RotationDegrees { get => _rotationDegrees; set => SetField(ref _rotationDegrees, value); }
 
+    private float _room3DRotationDegrees;
+    /// <summary>
+    /// 3D-preview-only rotation on the wall mesh. Does not change how the layer is
+    /// drawn onto the canvas (West ribbon stays continuous).
+    /// </summary>
+    public float Room3DRotationDegrees
+    {
+        get => _room3DRotationDegrees;
+        set
+        {
+            float n = value % 360f;
+            if (n < 0) n += 360f;
+            SetField(ref _room3DRotationDegrees, n);
+        }
+    }
+
+    private bool _room3DFlipVertical;
+    /// <summary>3D-preview-only top↔bottom UV flip on the wall (independent of 2D).</summary>
+    public bool Room3DFlipVertical
+    {
+        get => _room3DFlipVertical;
+        set => SetField(ref _room3DFlipVertical, value);
+    }
+
     private float _opacity = 1f;
     /// <summary>Target opacity (0–1). Persisted; animated via <see cref="DrawOpacity"/>.</summary>
     public float Opacity
@@ -89,6 +113,7 @@ public sealed class CompositionLayer : INotifyPropertyChanged
         set
         {
             if (!SetField(ref _nativeWidth, value)) return;
+            ClampCropAfterNativeChange();
             NotifyCropSliderLimits();
         }
     }
@@ -100,37 +125,63 @@ public sealed class CompositionLayer : INotifyPropertyChanged
         set
         {
             if (!SetField(ref _nativeHeight, value)) return;
+            ClampCropAfterNativeChange();
             NotifyCropSliderLimits();
         }
     }
 
-    public int CropXMax => Math.Max(0, NativeWidth - 1);
-    public int CropYMax => Math.Max(0, NativeHeight - 1);
+    public int CropXMax => Math.Max(0, Math.Max(NativeWidth, 0) - DesiredCropW());
+    public int CropYMax => Math.Max(0, Math.Max(NativeHeight, 0) - DesiredCropH());
     public int CropWMax => Math.Max(1, NativeWidth);
     public int CropHMax => Math.Max(1, NativeHeight);
 
     private int _cropX;
     /// <summary>Left of this layer's crop in native pixels. Persisted per layer.</summary>
-    public int CropX { get => _cropX; set => SetField(ref _cropX, Math.Max(0, value)); }
+    public int CropX
+    {
+        get => _cropX;
+        set => SetField(ref _cropX, Math.Clamp(value, 0, CropXMax));
+    }
 
     private int _cropY;
     /// <summary>Top of this layer's crop in native pixels. Persisted per layer.</summary>
-    public int CropY { get => _cropY; set => SetField(ref _cropY, Math.Max(0, value)); }
+    public int CropY
+    {
+        get => _cropY;
+        set => SetField(ref _cropY, Math.Clamp(value, 0, CropYMax));
+    }
 
     private int _cropW;
-    /// <summary>Crop width in native pixels. 0 = full width. Sliders see the clamped size so they cannot snap to 1 px.</summary>
+    /// <summary>Crop width in native pixels. 0 = full width.</summary>
     public int CropW
     {
-        get => GetClampedCrop().W;
-        set => SetField(ref _cropW, Math.Max(0, value));
+        get => DesiredCropW();
+        set
+        {
+            int nw = Math.Max(NativeWidth, 1);
+            int w = value <= 0 ? nw : Math.Clamp(value, 1, nw);
+            if (!SetField(ref _cropW, w)) return;
+            // Keep the crop window on-image when width shrinks.
+            if (_cropX > CropXMax)
+                CropX = CropXMax;
+            NotifyCropPanLimits();
+        }
     }
 
     private int _cropH;
-    /// <summary>Crop height in native pixels. 0 = full height. Sliders see the clamped size so they cannot snap to 1 px.</summary>
+    /// <summary>Crop height in native pixels. 0 = full height.</summary>
     public int CropH
     {
-        get => GetClampedCrop().H;
-        set => SetField(ref _cropH, Math.Max(0, value));
+        get => DesiredCropH();
+        set
+        {
+            int nh = Math.Max(NativeHeight, 1);
+            int h = value <= 0 ? nh : Math.Clamp(value, 1, nh);
+            if (!SetField(ref _cropH, h)) return;
+            if (_cropY > CropYMax)
+                CropY = CropYMax;
+            NotifyCropPanLimits();
+        }
     }
 
     private bool _blackKeyEnabled;
@@ -190,12 +241,49 @@ public sealed class CompositionLayer : INotifyPropertyChanged
 
     private void NotifyCropSliderLimits()
     {
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropXMax)));
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropYMax)));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropWMax)));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropHMax)));
+        NotifyCropPanLimits();
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropW)));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropH)));
+    }
+
+    private void NotifyCropPanLimits()
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropXMax)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropYMax)));
+    }
+
+    private void ClampCropAfterNativeChange()
+    {
+        if (NativeWidth <= 0 || NativeHeight <= 0)
+            return;
+
+        if (_cropW > NativeWidth)
+            _cropW = NativeWidth;
+        if (_cropH > NativeHeight)
+            _cropH = NativeHeight;
+
+        int maxX = Math.Max(0, NativeWidth - DesiredCropW());
+        int maxY = Math.Max(0, NativeHeight - DesiredCropH());
+        if (_cropX > maxX)
+            _cropX = maxX;
+        if (_cropY > maxY)
+            _cropY = maxY;
+    }
+
+    private int DesiredCropW()
+    {
+        int nw = Math.Max(NativeWidth, 0);
+        if (nw <= 0) return 0;
+        return _cropW <= 0 ? nw : Math.Clamp(_cropW, 1, nw);
+    }
+
+    private int DesiredCropH()
+    {
+        int nh = Math.Max(NativeHeight, 0);
+        if (nh <= 0) return 0;
+        return _cropH <= 0 ? nh : Math.Clamp(_cropH, 1, nh);
     }
 
     public Vector2 GetDrawSize()
@@ -206,7 +294,11 @@ public sealed class CompositionLayer : INotifyPropertyChanged
         return new Vector2(srcW * Scale, srcH * Scale);
     }
 
-    /// <summary>Clamped crop rectangle in native pixels. 0×0 crop means the full frame.</summary>
+    /// <summary>
+    /// Crop rectangle in native pixels as a fixed W×H window.
+    /// Position is clamped so the window stays on-image (W/H are not shrunk by X/Y).
+    /// 0×0 stored size means the full frame.
+    /// </summary>
     public (int X, int Y, int W, int H) GetClampedCrop()
     {
         int nw = Math.Max(NativeWidth, 0);
@@ -214,12 +306,10 @@ public sealed class CompositionLayer : INotifyPropertyChanged
         if (nw <= 0 || nh <= 0)
             return (0, 0, 0, 0);
 
-        int w = _cropW <= 0 ? nw : _cropW;
-        int h = _cropH <= 0 ? nh : _cropH;
-        int x = Math.Clamp(_cropX, 0, nw - 1);
-        int y = Math.Clamp(_cropY, 0, nh - 1);
-        w = Math.Clamp(w, 1, nw - x);
-        h = Math.Clamp(h, 1, nh - y);
+        int w = DesiredCropW();
+        int h = DesiredCropH();
+        int x = Math.Clamp(_cropX, 0, Math.Max(0, nw - w));
+        int y = Math.Clamp(_cropY, 0, Math.Max(0, nh - h));
         return (x, y, w, h);
     }
 
@@ -261,10 +351,41 @@ public sealed class CompositionLayer : INotifyPropertyChanged
 
     public void ResetCrop()
     {
-        CropX = 0;
-        CropY = 0;
-        CropW = Math.Max(NativeWidth, 0);
-        CropH = Math.Max(NativeHeight, 0);
+        SetCrop(0, 0, Math.Max(NativeWidth, 0), Math.Max(NativeHeight, 0));
+    }
+
+    /// <summary>
+    /// Apply crop in W/H-then-X/Y order so pan limits use the intended window size.
+    /// Object initializers that set CropX before CropW would otherwise clamp X to 0.
+    /// </summary>
+    public void SetCrop(int x, int y, int w, int h)
+    {
+        int nw = Math.Max(NativeWidth, 0);
+        int nh = Math.Max(NativeHeight, 0);
+        if (nw <= 0 || nh <= 0)
+        {
+            _cropX = Math.Max(0, x);
+            _cropY = Math.Max(0, y);
+            _cropW = Math.Max(0, w);
+            _cropH = Math.Max(0, h);
+            NotifyCropFieldsChanged();
+            return;
+        }
+
+        _cropW = w <= 0 ? nw : Math.Clamp(w, 1, nw);
+        _cropH = h <= 0 ? nh : Math.Clamp(h, 1, nh);
+        _cropX = Math.Clamp(x, 0, Math.Max(0, nw - DesiredCropW()));
+        _cropY = Math.Clamp(y, 0, Math.Max(0, nh - DesiredCropH()));
+        NotifyCropFieldsChanged();
+    }
+
+    private void NotifyCropFieldsChanged()
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropW)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropH)));
+        NotifyCropPanLimits();
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropX)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CropY)));
     }
 
     /// <summary>
@@ -284,10 +405,7 @@ public sealed class CompositionLayer : INotifyPropertyChanged
         }
 
         var (x, y, w, h) = GetClampedCrop();
-        CropX = x;
-        CropY = y;
-        CropW = w;
-        CropH = h;
+        SetCrop(x, y, w, h);
     }
 
     /// <summary>

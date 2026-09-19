@@ -48,17 +48,8 @@ public sealed class NdiZoneOrientBlit : IDisposable
 
     public static NdiZoneOrient ResolveOrient(ZoneDefinition zone)
     {
-        if (zone.Id.Equals("floor", StringComparison.OrdinalIgnoreCase))
-            return NdiZoneOrient.Rot90Cw; // nord (right) → bottom
-
-        int rot = ((int)MathF.Round(zone.RotationDegrees) % 360 + 360) % 360;
-        return rot switch
-        {
-            180 => NdiZoneOrient.Rot180,   // est: floor at top of AABB
-            270 => NdiZoneOrient.Rot90Cw,  // sud: floor at right of AABB
-            90 => NdiZoneOrient.Rot90Ccw,  // stage/nord: floor at left of AABB
-            _ => NdiZoneOrient.None        // west: floor already at bottom
-        };
+        // Zone-id canonical unwrap: floor edge → bottom of NDI frame (same as 3D).
+        return (NdiZoneOrient)WallFloorMapping.FloorBottomOrientCode(zone.Id);
     }
 
     public static (int OutW, int OutH) OutputSize(int cropW, int cropH, NdiZoneOrient orient)

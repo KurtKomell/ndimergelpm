@@ -21,6 +21,7 @@ internal static class BrowserGpuSelector
         public required uint DeviceId { get; init; }
         public required Luid Luid { get; init; }
         public required bool IsIntel { get; init; }
+        public bool IsNvidia => VendorId == VendorNvidia;
     }
 
     /// <summary>
@@ -89,15 +90,22 @@ internal static class BrowserGpuSelector
     public static string BuildWebViewGpuArguments(in Selection selection)
     {
         var sb = new StringBuilder();
-        // Force ANGLE/D3D11 onto the selected vendor/device (Chromium testing switches
-        // are the practical way to pin WebView2 away from the discrete NVIDIA GPU).
+        // Pin via adapter LUID only. Chromium --gpu-testing-* switches are for
+        // test harnesses and can cause visible WebView stutter on real GPUs.
         sb.Append("--use-angle=d3d11 ");
         sb.Append("--enable-gpu-rasterization ");
         sb.Append("--ignore-gpu-blocklist ");
-        sb.Append($"--gpu-testing-vendor-id=0x{selection.VendorId:X} ");
-        sb.Append($"--gpu-testing-device-id=0x{selection.DeviceId:X} ");
+        sb.Append("--disable-gpu-vsync ");
         sb.Append($"--adapter-luid={selection.Luid.HighPart},{unchecked((int)selection.Luid.LowPart)}");
         return sb.ToString();
+    }
+
+    public static string ModeLabel(in Selection selection)
+    {
+        if (selection.IsIntel) return "Intel";
+        if (selection.IsNvidia) return "NVIDIA";
+        var name = selection.Name;
+        return string.IsNullOrWhiteSpace(name) ? $"0x{selection.VendorId:X}" : name;
     }
 
     private static Selection ToSelection(in AdapterDescription1 desc, bool isIntel) => new()

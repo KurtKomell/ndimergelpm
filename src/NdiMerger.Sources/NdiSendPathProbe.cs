@@ -48,7 +48,7 @@ public static class NdiSendPathProbe
         }
 
         var live = hits.Where(kv => kv.Value > 0).OrderByDescending(kv => kv.Value).Select(kv => kv.Key).ToArray();
-        var prefix = viewerCount > 0 ? "Viewer verbunden: " : "Wartet auf Viewer: ";
+        var prefix = viewerCount > 0 ? "Viewer connected: " : "Waiting for viewer: ";
 
         if (live.Length > 0)
             return prefix + string.Join("  +  ", live.Select(LabelFor));
@@ -56,7 +56,7 @@ public static class NdiSendPathProbe
         if (boundIpv4s is { Count: > 0 })
             return prefix + string.Join("  +  ", boundIpv4s.Select(LabelFor));
 
-        return viewerCount > 0 ? "Viewer verbunden" : "Wartet auf Viewer";
+        return viewerCount > 0 ? "Viewer connected" : "Waiting for viewer";
     }
 
     private static void Add(Dictionary<string, int> hits, string ip, int weight)

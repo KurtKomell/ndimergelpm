@@ -91,11 +91,10 @@ public static class WallCarousel
         "wall_west_2",
         "wall_west_3"
     ];
-
     public static IReadOnlyList<CarouselDirectionChoice> DirectionChoices { get; } =
     [
-        new(WallCarouselDirection.WestToOst, "West → Ost → Süd"),
-        new(WallCarouselDirection.WestToSud, "West → Süd → Ost")
+        new(WallCarouselDirection.WestToOst, "West → East → South"),
+        new(WallCarouselDirection.WestToSud, "West → South → East")
     ];
 
     public static bool IsMovingCopy(CompositionLayer layer) =>
@@ -285,9 +284,6 @@ public static class WallCarousel
         if (rot >= 2f && rot <= 358f)
             return false;
 
-        if (ResolveGroup(layer.ZoneId) == WallGroup.West)
-            return true;
-
         if (!TryGetWestRibbon(zones, out var panels, out float ribbonY, out float ribbonH))
             return false;
 
@@ -297,10 +293,29 @@ public static class WallCarousel
 
         float ribbonX0 = panels[0].RibbonX;
         float ribbonX1 = panels[^1].RibbonX + panels[^1].RibbonWidth;
-        return layer.X + size.X > ribbonX0 &&
-               layer.X < ribbonX1 &&
-               layer.Y + size.Y > ribbonY &&
-               layer.Y < ribbonY + ribbonH;
+        bool overlaps =
+            layer.X + size.X > ribbonX0 &&
+            layer.X < ribbonX1 &&
+            layer.Y + size.Y > ribbonY &&
+            layer.Y < ribbonY + ribbonH;
+        if (!overlaps)
+            return false;
+
+        // Ribbon path only when content actually spans more than one West panel
+        // (carousel / full-West snap). Single-panel West 1/2/3 snaps use normal quads
+        // so each zone keeps its own canvas overlay.
+        int hitPanels = 0;
+        foreach (var panel in panels)
+        {
+            float ox0 = MathF.Max(layer.X, panel.RibbonX);
+            float ox1 = MathF.Min(layer.X + size.X, panel.RibbonX + panel.RibbonWidth);
+            float oy0 = MathF.Max(layer.Y, ribbonY);
+            float oy1 = MathF.Min(layer.Y + size.Y, ribbonY + ribbonH);
+            if (ox1 - ox0 >= 1f && oy1 - oy0 >= 1f)
+                hitPanels++;
+        }
+
+        return hitPanels >= 2;
     }
 
     private static bool TryGetWestRibbon(
@@ -459,9 +474,9 @@ public static class WallCarousel
         if (FindLayerForGroup(WallGroup.West, zones, layers) is null)
             missing.Add("West");
         if (FindLayerForGroup(WallGroup.Ost, zones, layers) is null)
-            missing.Add("Ost");
+            missing.Add("East");
         if (FindLayerForGroup(WallGroup.Sud, zones, layers) is null)
-            missing.Add("Süd");
+            missing.Add("South");
         return missing.Count == 0 ? null : string.Join(", ", missing);
     }
 
@@ -488,6 +503,8 @@ public static class WallCarousel
             Y = source.Y,
             Scale = source.Scale,
             RotationDegrees = source.RotationDegrees,
+            Room3DRotationDegrees = source.Room3DRotationDegrees,
+            Room3DFlipVertical = source.Room3DFlipVertical,
             Opacity = source.Opacity <= 0 ? 1f : source.Opacity,
             ScaleMode = source.ScaleMode,
             ZoneId = null,
@@ -497,13 +514,10 @@ public static class WallCarousel
             ZIndex = source.ZIndex + 1,
             NativeWidth = source.NativeWidth,
             NativeHeight = source.NativeHeight,
-            CropX = source.CropX,
-            CropY = source.CropY,
-            CropW = source.CropW,
-            CropH = source.CropH,
             BlackKeyEnabled = source.BlackKeyEnabled,
             BlackKeyThreshold = source.BlackKeyThreshold
         };
+        copy.SetCrop(source.CropX, source.CropY, source.CropW, source.CropH);
         copy.SnapDrawOpacity();
         return copy;
     }

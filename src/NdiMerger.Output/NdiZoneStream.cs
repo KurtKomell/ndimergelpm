@@ -13,8 +13,8 @@ public sealed class NdiZoneStream : IDisposable
 {
     public static readonly (string ZoneId, string NameSuffix, string DisplayName)[] Catalog =
     [
-        ("wall_sud", "Sud", "Wall Sud"),
-        ("wall_est", "Est", "Wall Est"),
+        ("wall_sud", "Sud", "Wall South"),
+        ("wall_est", "Est", "Wall East"),
         ("wall_west_1", "West-1", "Wall West 1"),
         ("wall_west_2", "West-2", "Wall West 2"),
         ("wall_west_3", "West-3", "Wall West 3"),
@@ -80,15 +80,17 @@ public sealed class NdiZoneStream : IDisposable
         return _outW > 0 && _outH > 0;
     }
 
-    public void EnsureStarted(string outputBaseName)
+    public void EnsureStarted(string outputBaseName, int frameRate = NdiFrameSpec.TargetFps)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_outW <= 0 || _outH <= 0)
             throw new InvalidOperationException($"Zone '{_zoneId}' is not bound.");
 
+        int fps = NdiOutputSender.NormalizeFps(frameRate);
         if (_sender is { IsActive: true } &&
             _sender.OutputWidth == _outW &&
             _sender.OutputHeight == _outH &&
+            _sender.FrameRate == fps &&
             _outTexture is not null)
             return;
 
@@ -100,7 +102,7 @@ public sealed class NdiZoneStream : IDisposable
             var ndiName = string.IsNullOrWhiteSpace(outputBaseName)
                 ? _nameSuffix
                 : $"{outputBaseName}-{_nameSuffix}";
-            _sender = NdiOutputSender.CreateStandard(_gpu, ndiName);
+            _sender = NdiOutputSender.CreateStandard(_gpu, ndiName, frameRate: fps);
             _sender.Initialize(_outW, _outH);
         }
         catch
