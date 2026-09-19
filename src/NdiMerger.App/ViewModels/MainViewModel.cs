@@ -2741,6 +2741,16 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         if (zone is null)
             return false;
 
+        // Untagged / native place (e.g. monitor3 ribbon spanning West without ZoneId):
+        // still count as the layer for that panel so 3D UV flip/rot apply.
+        if (string.IsNullOrEmpty(layer.ZoneId))
+        {
+            var (bx, by, bw, bh) = layer.GetMapBounds();
+            return bw > 1f && bh > 1f &&
+                   bx < zone.X + zone.Width && bx + bw > zone.X &&
+                   by < zone.Y + zone.Height && by + bh > zone.Y;
+        }
+
         if (WallCarousel.ResolveGroup(zoneId) == WallGroup.West &&
             WallCarousel.ResolveGroup(layer.ZoneId) == WallGroup.West)
         {
@@ -2891,24 +2901,35 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         if (exact is not null)
             return exact;
 
+        var zone = Zones.FirstOrDefault(z => z.Id.Equals(zoneId, StringComparison.OrdinalIgnoreCase));
+        if (zone is null)
+            return null;
+
+        bool Overlaps(CompositionLayer l)
+        {
+            var (bx, by, bw, bh) = l.GetMapBounds();
+            return bw > 1f && bh > 1f &&
+                   bx < zone.X + zone.Width && bx + bw > zone.X &&
+                   by < zone.Y + zone.Height && by + bh > zone.Y;
+        }
+
+        // Untagged layers that sit on this zone (e.g. monitor3 West ribbon without ZoneId).
+        var untagged = visible
+            .Where(l => string.IsNullOrEmpty(l.ZoneId) && Overlaps(l))
+            .OrderByDescending(l => l.SourceKind == SourceKind.Spout)
+            .ThenByDescending(l => l.ZIndex)
+            .FirstOrDefault();
+        if (untagged is not null)
+            return untagged;
+
         // West ribbon fallback: a layer tagged to another West panel that still overlaps this one
         // (carousel / full-ribbon content spanning West 1–3).
         if (WallCarousel.ResolveGroup(zoneId) != WallGroup.West)
             return null;
 
-        var zone = Zones.FirstOrDefault(z => z.Id.Equals(zoneId, StringComparison.OrdinalIgnoreCase));
-        if (zone is null)
-            return null;
-
         return visible
             .Where(l => WallCarousel.ResolveGroup(l.ZoneId) == WallGroup.West)
-            .Where(l =>
-            {
-                var (bx, by, bw, bh) = l.GetMapBounds();
-                return bw > 1f && bh > 1f &&
-                       bx < zone.X + zone.Width && bx + bw > zone.X &&
-                       by < zone.Y + zone.Height && by + bh > zone.Y;
-            })
+            .Where(Overlaps)
             .OrderByDescending(l => l.SourceKind == SourceKind.Spout)
             .ThenByDescending(l => l.ZIndex)
             .FirstOrDefault();
